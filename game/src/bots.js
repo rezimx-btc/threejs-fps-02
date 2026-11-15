@@ -1,22 +1,40 @@
-// Bot AI: waypoint navigation, holding, rotating, engaging and defusing. Bots
-// pick a route through the map graph, walk it, and fight what they can see: a
-// reaction delay, then bursts with spread that grows with distance and movement,
-// so a bot that catches you sprinting across mid still has to earn the kill.
-// Defenders hold their site; when the charge is planted the nearest defender
-// pushes in to defuse. Attackers push a site together, then hold it.
+// Bot AI: a 5v5 squad with roles, not five lone wolves. Each round the IGL
+// (the first attacker bot) calls a plan — which site the squad hits, which lane
+// the lurker fakes — and the squad executes it together: the entry goes in
+// first, support trades the entry's death, the lurker draws defenders to the
+// other site, the AWPer holds the long angle with a DMR. Defenders anchor their
+// sites and a mid roamer, and when the charge is planted they retake together
+// instead of trickling in one by one. Bots radio what they do, so the player
+// reads the plan in the feed instead of guessing.
+// Fights: a reaction delay, then bursts with spread that grows with distance and
+// movement, so a bot that catches you sprinting across mid still has to earn the
+// kill. Difficulty climbs with the round: defenders sharpen a little every round
+// the player loses, so a match that snowballs still stays honest.
 import * as THREE from 'three';
 import { findPath } from './map.js';
 import { moveBox } from './actors.js';
 
-const BOT_NAMES_A = ['Rook', 'Sable', 'Iris'];
-const BOT_NAMES_B = ['Cinder', 'Ash', 'Flint', 'Onyx'];
+const BOT_NAMES_A = ['Rook', 'Sable', 'Iris', 'Hawk', 'Wren']; // Kestrel attackers
+const BOT_NAMES_B = ['Cinder', 'Ash', 'Flint', 'Onyx', 'Ember']; // Vulture defenders
+const ROLES_A = ['igl', 'entry', 'support', 'lurker', 'awper'];
+const ROLES_B = ['anchor', 'anchor', 'anchor', 'roamer', 'anchor'];
+
+const CALLS = {
+  plan: (site, fake) => `Plan: hit ${site} — ${fake} fake, then commit`,
+  push: (name, site) => `${name}: pushing ${site}`,
+  rotate: (name, site) => `${name}: rotating to ${site}`,
+  planted: (site) => `Charge planted at ${site} — hold the crossfire`,
+  defuse: (name) => `${name}: defusing the charge`,
+  retake: 'Retake together — two in, two hold the flank',
+  lurker: (name, site) => `${name}: making noise at ${site}`,
+};
 
 function makeBot(actor, team, skill, role) {
   return {
     actor,
     team,
     skill, // 0.6 (green) to 1.0 (sharp)
-    role, // 'attack' | 'defend'
+    role, // 'igl' | 'entry' | 'support' | 'lurker' | 'awper' | 'anchor' | 'roamer'
     state: 'advance',
     site: null,
     path: [],
@@ -33,9 +51,9 @@ function makeBot(actor, team, skill, role) {
     pauseUntil: 0,
     strafeDir: 1,
     strafeUntil: 0,
-    investigate: null,
     defusing: false,
     defuseProgress: 0,
+    grenadeThrown: false,
     speed: 3.1 + skill * 1.1,
   };
 }
@@ -43,37 +61,48 @@ function makeBot(actor, team, skill, role) {
 export function createBots(scene, createActor, graph, sites) {
   const bots = [];
   BOT_NAMES_A.forEach((name, i) => {
-    const actor = createActor(scene, { team: 'A', name, x: -2 + i * 2, z: 14 });
-    bots.push(makeBot(actor, 'A', 0.68 + i * 0.07, 'attack'));
+    const actor = createActor(scene, { team: 'A', name, x: -4 + i * 2, z: 16 });
+    bots.push(makeBot(actor, 'A', 0.66 + i * 0.06, ROLES_A[i]));
   });
   BOT_NAMES_B.forEach((name, i) => {
-    const actor = createActor(scene, { team: 'B', name, x: -6 + i * 4, z: -14 });
-    bots.push(makeBot(actor, 'B', 0.62 + (i % 3) * 0.09, 'defend'));
+    const actor = createActor(scene, { team: 'B', name, x: -8 + i * 4, z: -16 });
+    bots.push(makeBot(actor, 'B', 0.6 + (i % 3) * 0.08, ROLES_B[i]));
   });
   return bots;
 }
 
-// Assign each bot a job for the round: attackers pick a site to hit together,
-// defenders split across the two sites and mid.
-export function assignRound(bots, random, roundNumber) {
+// The IGL calls the round: attackers hit one site together, the lurker fakes
+// the other, the AWPer posts up on the long angle into the site. Defenders
+// split: two anchor A, two anchor B, the roamer holds mid and swings to noise.
+export function assignRound(bots, random, roundNumber, callout) {
   const sitePick = random() < 0.55 ? 'A' : 'B';
+  const fakeSite = sitePick === 'A' ? 'B' : 'A';
   for (const bot of bots) {
-    bot.state = bot.role === 'attack' ? 'advance' : 'hold';
+    bot.state = bot.role === 'anchor' || bot.role === 'roamer' ? 'hold' : 'advance';
     bot.path = [];
     bot.pathIndex = 0;
     bot.target = null;
     bot.defusing = false;
     bot.defuseProgress = 0;
-    bot.investigate = null;
+    bot.grenadeThrown = false;
     bot.holdUntil = 0;
-    if (bot.role === 'attack') {
-      // The whole attack squad hits one site; the odd round out, one bot fakes mid.
-      bot.site = roundNumber % 2 === 0 && bot.actor.name === 'Iris' ? (sitePick === 'A' ? 'B' : 'A') : sitePick;
+    // Difficulty curve: every round sharpens the defence a touch.
+    const curve = Math.min(0.15, (roundNumber - 1) * 0.025);
+    bot.skill = Math.min(0.98, bot.skill + (bot.team === 'B' ? curve : curve * 0.5));
+    bot.speed = 3.1 + bot.skill * 1.1;
+    if (bot.team === 'A') {
+      if (bot.role === 'lurker') bot.site = fakeSite;
+      else if (bot.role === 'awper') bot.site = sitePick;
+      else bot.site = sitePick;
     } else {
-      const index = bots.filter((b) => b.role === 'defend').indexOf(bot);
-      bot.site = index < 2 ? 'A' : index === 2 ? 'B' : 'mid';
+      const anchors = bots.filter((b) => b.team === 'B' && b.role === 'anchor');
+      const index = anchors.indexOf(bot);
+      if (bot.role === 'roamer') bot.site = 'mid';
+      else bot.site = index < 2 ? 'A' : 'B';
     }
   }
+  if (callout) callout(CALLS.plan(sitePick, fakeSite));
+  return { site: sitePick, fake: fakeSite };
 }
 
 function nearestNode(graph, x, z) {
@@ -100,7 +129,11 @@ const _to = new THREE.Vector3();
 const _dir = new THREE.Vector3();
 
 export function updateBots(bots, dt, ctx) {
-  const { time, random, graph, sites, colliders, player, hasLineOfSight, fireBotShot, onBotKilled, planted, plantPos } = ctx;
+  const {
+    time, random, graph, sites, colliders, player, hasLineOfSight, fireBotShot,
+    planted, plantPos, plantSite, onDefused, onPlantCall, onRotateCall,
+    throwBotGrenade, hasKit,
+  } = ctx;
 
   for (const bot of bots) {
     const actor = bot.actor;
@@ -133,23 +166,62 @@ export function updateBots(bots, dt, ctx) {
       bot.target = null;
     }
 
-    // --- Defuse: a defender with a planted charge pushes the site and channels. ---
-    if (bot.role === 'defend' && planted && plantPos) {
+    // --- The lurker fires a grenade at the fake site, to sell the bluff. ---
+    if (bot.role === 'lurker' && !bot.grenadeThrown && bot.state === 'advance' && throwBotGrenade) {
+      const site = sites[bot.site];
+      const dx = site.cx - actor.position.x;
+      const dz = site.cz - actor.position.z;
+      if (Math.hypot(dx, dz) < 18) {
+        bot.grenadeThrown = true;
+        throwBotGrenade(actor, site.cx, site.cz);
+        if (onRotateCall) onRotateCall(CALLS.lurker(actor.name, bot.site));
+      }
+    }
+
+    // --- Defuse: when the charge is planted, defenders retake as a pair. ---
+    if (bot.team === 'B' && planted && plantPos) {
       const dx = plantPos.x - actor.position.x;
       const dz = plantPos.z - actor.position.z;
       const dist = Math.hypot(dx, dz);
-      if (dist < 1.6) {
-        bot.state = 'defuse';
-        bot.defuseProgress += dt;
-        actor.velocity.set(0, 0, 0);
-        actor.yaw = Math.atan2(-dx, -dz);
-        if (bot.defuseProgress >= 4) ctx.onDefused(bot);
-        continue;
+      // The closest defender defuses; the rest hold the retake angles.
+      const defenders = bots.filter((b) => b.team === 'B' && b.actor.alive);
+      const closest = defenders.reduce((best, b) => {
+        const d = Math.hypot(plantPos.x - b.actor.position.x, plantPos.z - b.actor.position.z);
+        return !best || d < best.d ? { bot: b, d } : best;
+      }, null);
+      if (closest && closest.bot === bot) {
+        if (dist < 1.6) {
+          if (!bot.defusing && onPlantCall) onPlantCall(CALLS.defuse(actor.name));
+          bot.state = 'defuse';
+          bot.defusing = true;
+          bot.defuseProgress += dt;
+          actor.velocity.set(0, 0, 0);
+          actor.yaw = Math.atan2(-dx, -dz);
+          actor.syncMesh();
+          // The channel itself is reported to main.js through ctx.defuseBot.
+          ctx.defuseBot = bot;
+          continue;
+        }
+        bot.state = 'rotate';
+        bot.site = null;
+        if (bot.target && time >= bot.reactUntil) {
+          // A defender who sees an enemy on the way in fights first: fall
+          // through to the combat section below instead of walking on.
+        } else {
+          moveAlong(bot, plantPos.x, plantPos.z, dt, ctx);
+          continue;
+        }
       }
-      bot.state = 'rotate';
-      bot.site = null;
-      moveAlong(bot, plantPos.x, plantPos.z, dt, ctx);
-      continue;
+      // Not the defuser: push to a retake angle near the site and fight.
+      if (!bot.target) {
+        const angle = sites[plantSite] || sites.A;
+        const holdX = angle.cx + (bot.actor.name.charCodeAt(0) % 2 === 0 ? -4 : 4);
+        const holdZ = angle.cz + 5;
+        if (Math.hypot(holdX - actor.position.x, holdZ - actor.position.z) > 1.5) {
+          moveAlong(bot, holdX, holdZ, dt, ctx);
+          continue;
+        }
+      }
     }
 
     // --- Combat: face the target, strafe, and fire in bursts after reacting. ---
@@ -160,14 +232,15 @@ export function updateBots(bots, dt, ctx) {
       const moving = Math.hypot(actor.velocity.x, actor.velocity.z) > 0.5;
       if (time >= bot.pauseUntil) {
         if (bot.burstLeft <= 0) {
-          bot.burstLeft = 3 + Math.floor(random() * 3);
-          bot.pauseUntil = time + 0.55 + random() * 0.45;
+          // The AWPer fires slow, heavy single shots; the rest burst.
+          bot.burstLeft = bot.role === 'awper' ? 1 : 3 + Math.floor(random() * 3);
+          bot.pauseUntil = time + (bot.role === 'awper' ? 0.9 : 0.55) + random() * 0.45;
         }
         if (time >= bot.nextShotAt && bot.burstLeft > 0) {
-          bot.nextShotAt = time + 0.115;
+          bot.nextShotAt = time + (bot.role === 'awper' ? 0.5 : 0.115);
           bot.burstLeft -= 1;
           const dist = Math.hypot(dx, dz);
-          const spread = (0.014 + dist * 0.0009 + (moving ? 0.02 : 0)) * (1.35 - bot.skill * 0.5);
+          const spread = (0.014 + dist * 0.0009 + (moving ? 0.02 : 0)) * (1.35 - bot.skill * 0.5) * (bot.role === 'awper' ? 0.55 : 1);
           fireBotShot(bot, spread);
         }
       }
@@ -223,7 +296,9 @@ export function updateBots(bots, dt, ctx) {
       continue;
     }
 
-    // advance / rotate: walk the route to the site.
+    // advance / rotate: walk the route to the site. The entry leads, support
+    // trails a step behind, the AWPer stops at the long angle instead of
+    // walking into the site.
     if (bot.state === 'advance' || bot.state === 'rotate') {
       if (!bot.path.length) {
         const site = bot.site ? sites[bot.site] : null;
@@ -231,6 +306,14 @@ export function updateBots(bots, dt, ctx) {
         const tz = site ? site.cz : -7;
         bot.path = findPath(graph, actor.position.x, actor.position.z, tx, tz);
         bot.pathIndex = 0;
+      }
+      if (bot.role === 'awper' && bot.state === 'advance' && bot.pathIndex >= Math.max(1, bot.path.length - 2)) {
+        bot.state = 'hold';
+        bot.holdNode = -1;
+        bot.holdUntil = time + 4;
+        actor.velocity.set(0, 0, 0);
+        actor.syncMesh();
+        continue;
       }
       if (bot.pathIndex < bot.path.length) {
         const node = graph.nodes[bot.path[bot.pathIndex]];

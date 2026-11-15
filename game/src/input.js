@@ -1,6 +1,7 @@
-// Input: keyboard state, pointer-lock mouse look, and firing. Pointer lock is
-// requested by the HUD's play button; losing it pauses the game (unless a shot
-// capture is running, where input is scripted instead).
+// Input: keyboard state, pointer-lock mouse look, firing, and aim-down-sights.
+// Pointer lock is requested by the HUD's play button; losing it pauses the game
+// (unless a shot capture is running, where input is scripted instead). Right
+// mouse holds ADS; the Tab key opens the scoreboard while held.
 export function createInput(canvas, onLockChange) {
   const keys = new Set();
   let locked = false;
@@ -8,11 +9,13 @@ export function createInput(canvas, onLockChange) {
   let lookY = 0;
   let firing = false;
   let firingEdge = false;
+  let aiming = false;
 
   function onKeyDown(event) {
     if (event.repeat) return;
     keys.add(event.code);
     if (event.code === 'Space') event.preventDefault();
+    if (event.code === 'Tab') event.preventDefault();
   }
   function onKeyUp(event) {
     keys.delete(event.code);
@@ -25,13 +28,18 @@ export function createInput(canvas, onLockChange) {
   function onMouseDown(event) {
     if (!locked) return;
     if (event.button === 0) { firing = true; firingEdge = true; }
+    if (event.button === 2) aiming = true;
   }
   function onMouseUp(event) {
     if (event.button === 0) firing = false;
+    if (event.button === 2) aiming = false;
+  }
+  function onContextMenu(event) {
+    event.preventDefault();
   }
   function onLock() {
     locked = document.pointerLockElement === canvas;
-    if (!locked) firing = false;
+    if (!locked) { firing = false; aiming = false; }
     onLockChange(locked);
   }
 
@@ -40,12 +48,15 @@ export function createInput(canvas, onLockChange) {
   window.addEventListener('mousemove', onMouseMove);
   window.addEventListener('mousedown', onMouseDown);
   window.addEventListener('mouseup', onMouseUp);
+  canvas.addEventListener('contextmenu', onContextMenu);
   document.addEventListener('pointerlockchange', onLock);
 
   return {
     keys,
     get locked() { return locked; },
     get firing() { return firing; },
+    get aiming() { return aiming; },
+    get scoreboardOpen() { return keys.has('Tab'); },
     takeLook() {
       const out = { x: lookX, y: lookY };
       lookX = 0;
@@ -66,6 +77,7 @@ export function createInput(canvas, onLockChange) {
     clear() {
       keys.clear();
       firing = false;
+      aiming = false;
     },
   };
 }

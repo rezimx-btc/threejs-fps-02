@@ -1,6 +1,8 @@
 // Synthesised sound: every effect is built from WebAudio oscillators and filtered
 // noise, so the game ships no audio assets and makes no network request. The context
 // is created lazily on the first user gesture (browsers block audio before that).
+// Footsteps are the hearing game: your own steps are soft ticks, and an enemy
+// bot's steps grow louder the closer it is, so a flank is heard before it is seen.
 export function createAudio() {
   let ctx = null;
   let master = null;
@@ -60,7 +62,8 @@ export function createAudio() {
     osc.stop(t + duration + 0.02);
   }
 
-  // One shot per weapon family: carbine cracks, DMR thumps, shotgun booms, pistol pops.
+  // One shot per weapon family: carbine cracks, DMR thumps, shotgun booms,
+  // pistol pops, SMG rattles fast and light.
   function shot(kind) {
     if (!ensure()) return;
     if (kind === 'dmr') {
@@ -72,6 +75,9 @@ export function createAudio() {
     } else if (kind === 'sidearm') {
       noise(0.09, 'bandpass', 1800, 0.55);
       tone('square', 320, 140, 0.06, 0.18);
+    } else if (kind === 'smg') {
+      noise(0.08, 'bandpass', 2000, 0.5);
+      tone('square', 300, 160, 0.05, 0.14);
     } else {
       noise(0.11, 'bandpass', 1400, 0.7);
       tone('square', 240, 110, 0.07, 0.22);
@@ -107,9 +113,10 @@ export function createAudio() {
     noise(0.1, 'lowpass', 500, 0.25);
   }
 
-  function step() {
+  // A footstep: a short filtered tick. `loud` scales with proximity.
+  function step(loud = 1) {
     if (!ensure()) return;
-    noise(0.05, 'lowpass', 420, 0.1);
+    noise(0.05, 'lowpass', 420, 0.07 * loud);
   }
 
   function click() {
@@ -126,6 +133,11 @@ export function createAudio() {
   function plantBeep(final) {
     if (!ensure()) return;
     tone('square', final ? 1500 : 1050, final ? 1500 : 1050, final ? 0.3 : 0.08, 0.16);
+  }
+
+  function defuseTick() {
+    if (!ensure()) return;
+    tone('sine', 1250, 1250, 0.05, 0.14);
   }
 
   function explosion() {
@@ -147,5 +159,5 @@ export function createAudio() {
     notes.forEach((n, i) => tone('triangle', n, n, 0.18, 0.2, i * 0.12));
   }
 
-  return { ensure, shot, reload, dryFire, hit, kill, hurt, step, click, buy, plantBeep, explosion, roundWin, roundLose };
+  return { ensure, shot, reload, dryFire, hit, kill, hurt, step, click, buy, plantBeep, defuseTick, explosion, roundWin, roundLose };
 }

@@ -1,14 +1,16 @@
-// SANDLINE — a round-based tactical FPS in three.js. Boot, the one loop, and the
-// wiring between the modules: a fixed 60 Hz simulation feeding a render at the
-// display's rate. Vanguard (you + 3 bots) attacks; Ember (4 bots) defends the
-// Foundry and the Crane Yard. Plant the charge or wipe the defence — first to 5.
+// BREAKLINE — a 5v5 round-based tactical FPS in three.js. Boot, the one loop, and
+// the wiring between the modules: a fixed 60 Hz simulation feeding a render at the
+// display's rate. Kestrel (you + 4 bots) attacks; Vulture (5 bots) defends the
+// Depot and the Silos at the Kestrel Terminal. Plant the charge or wipe the
+// defence — first to 5 rounds takes the match. Defenders can defuse a planted
+// charge, so a plant is never safe until it blows.
 // ?shot=start|play|buy|end with &seed=N stages a deterministic frame for a
 // capture, renders it twice, then freezes it and sets window.__shotReady.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 import { createMap, buildGraph, MAP } from './map.js';
 import { createAudio } from './audio.js';
-import { WEAPONS, GRENADE } from './weapons.js';
+import { WEAPONS, GRENADE, DEFUSE_SECONDS } from './weapons.js';
 import { createPlayer } from './player.js';
 import { createActor } from './actors.js';
 import { createBots, assignRound, updateBots, botCountAlive } from './bots.js';
@@ -45,8 +47,8 @@ document.getElementById('game').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(PALETTE.canvas);
-scene.fog = new THREE.Fog(new THREE.Color(PALETTE.canvas), 30, 70);
-const camera = new THREE.PerspectiveCamera(74, window.innerWidth / window.innerHeight, 0.05, 160);
+scene.fog = new THREE.Fog(new THREE.Color(PALETTE.canvas), 34, 78);
+const camera = new THREE.PerspectiveCamera(74, window.innerWidth / window.innerHeight, 0.05, 180);
 scene.add(camera);
 
 // --- World and systems ---
@@ -78,9 +80,12 @@ let roundEndTimer = 0;
 let roundOverlayShown = false;
 let shakeAmp = 0;
 let nextBeepAt = 0;
+let nextDefuseBeepAt = 0;
 let buyOpen = false;
 let buyMenu = null;
 const seenEnemies = []; // {x, z, at} for the minimap
+const botStepAt = new Map(); // bot -> last footstep time
+let playerStepAcc = 0;
 const _origin = new THREE.Vector3();
 const _dir = new THREE.Vector3();
 const _muzzle = new THREE.Vector3();
@@ -95,6 +100,12 @@ function syncCamera() {
     camera.position.x += (random() * 2 - 1) * shakeAmp;
     camera.position.y += (random() * 2 - 1) * shakeAmp;
     camera.rotation.z = (random() * 2 - 1) * shakeAmp * 0.4;
+  }
+  // ADS narrows the field of view; it eases, it never snaps.
+  const targetFov = body.aiming ? 57 : 74;
+  if (Math.abs(camera.fov - targetFov) > 0.05) {
+    camera.fov += (targetFov - camera.fov) * 0.18;
+    camera.updateProjectionMatrix();
   }
 }
 
@@ -113,12 +124,15 @@ function resetActors() {
   player.reset(MAP.attackerSpawn.x, MAP.attackerSpawn.z, 0);
   const attackers = bots.filter((b) => b.team === 'A');
   const defenders = bots.filter((b) => b.team === 'B');
-  attackers.forEach((bot, i) => bot.actor.reset(-3 + i * 3, 13.5, 0));
-  defenders.forEach((bot, i) => bot.actor.reset(-7 + i * 4.5, -14.5, Math.PI));
-  assignRound(bots, random, match.round);
+  attackers.forEach((bot, i) => bot.actor.reset(-4 + i * 2, 16.5, 0));
+  defenders.forEach((bot, i) => bot.actor.reset(-8 + i * 4, -16.5, Math.PI));
+  const plan = assignRound(bots, random, match.round, (line) => match.addCallout(line));
+  match.plan = plan;
+  hud.setPlan(`Hit ${plan.site} — ${plan.fake} fake, then commit. First to 5.`);
   objective.reset();
   buyOpen = false;
   nextBeepAt = 0;
+  nextDefuseBeepAt = 0;
 }
 
 function startMatch() {
@@ -129,10 +143,10 @@ function startMatch() {
   hud.setMoney(match.money);
   hud.setWeapon(WEAPONS.sidearm.name, 0);
   hud.setAmmo(12, 48, false);
-  hud.setHealth(100);
+  hud.setHealth(100, 0);
   hud.showOverlay('buy');
   buyOpen = true;
-  buyMenu.refresh(match.owned, match.money);
+  buyMenu.refresh(match.owned, match.money, match.armor, match.hasHelmet, match.grenades);
   hud.setObjective('Buy phase — press B to open the shop, then deploy.');
   viewmodel.setWeapon('sidearm');
   started = true;
@@ -142,14 +156,33 @@ function beginLive() {
   match.beginLive();
   buyOpen = false;
   hud.showOverlay('none');
-  hud.setObjective('Plant the charge at A (Foundry) or B (Crane Yard) — or wipe the Ember team.');
+  hud.setObjective('Plant the charge at A (Depot) or B (Silos) — or wipe the Vulture team.');
   if (!shot) input.requestLock();
 }
 
+function scoreboardRows() {
+  const rows = [{ name: 'You', team: 'A', kills: match.kills, alive: body.alive }];
+  for (const bot of bots) {
+    rows.push({
+      name: bot.actor.name,
+      team: bot.team,
+      kills: match.killsBy[bot.actor.name] || 0,
+      alive: bot.actor.alive,
+    });
+  }
+  return rows.sort((a, b) => b.kills - a.kills || (a.team < b.team ? -1 : 1));
+}
+
+function scoreboardHtml() {
+  return scoreboardRows()
+    .map((r) => `<div>${r.name} — ${r.kills} kill${r.kills === 1 ? '' : 's'}${r.alive ? '' : ' (down)'}</div>`)
+    .join('');
+}
+
 function showRoundOverlay(title, sub) {
-  hud.showOverlay('round', { title, sub });
+  hud.showOverlay('round', { title, sub, board: scoreboardHtml() });
   roundOverlayShown = true;
-  roundEndTimer = 3;
+  roundEndTimer = 4;
 }
 
 function endRound(winner, reason) {
@@ -158,15 +191,17 @@ function endRound(winner, reason) {
   hud.setMoney(match.money);
   if (winner === 'A') audio.roundWin();
   else audio.roundLose();
+  const mvp = match.mvp();
+  const mvpLine = mvp ? ` MVP: ${mvp.name} (${mvp.kills}).` : '';
   if (match.phase === PHASE.MATCH_END) {
     showRoundOverlay(
-      winner === 'A' ? 'VANGUARD TAKES THE ROUND' : 'EMBER TAKES THE ROUND',
-      `${reason} — Match over: ${match.winsA}–${match.winsB}.`,
+      winner === 'A' ? 'KESTREL TAKES THE ROUND' : 'VULTURE TAKES THE ROUND',
+      `${reason} — Match over: ${match.winsA}–${match.winsB}.${mvpLine}`,
     );
   } else {
     showRoundOverlay(
-      winner === 'A' ? 'VANGUARD TAKES THE ROUND' : 'EMBER TAKES THE ROUND',
-      `${reason} — next round in a moment. +$${winner === 'A' ? '3,250' : '1,900'}.`,
+      winner === 'A' ? 'KESTREL TAKES THE ROUND' : 'VULTURE TAKES THE ROUND',
+      `${reason} — next round in a moment. +$${winner === 'A' ? '3,250' : '1,900'}.${mvpLine}`,
     );
   }
   if (input.locked) input.exitLock();
@@ -176,8 +211,8 @@ function checkRoundEnd() {
   if (match.phase !== PHASE.LIVE) return;
   const attackersAlive = botCountAlive(bots, 'A') + (body.alive ? 1 : 0);
   const defendersAlive = botCountAlive(bots, 'B');
-  if (defendersAlive === 0) endRound('A', 'Ember team eliminated.');
-  else if (attackersAlive === 0) endRound('B', 'Vanguard eliminated.');
+  if (defendersAlive === 0) endRound('A', 'Vulture team eliminated.');
+  else if (attackersAlive === 0) endRound('B', 'Kestrel eliminated.');
 }
 
 function onPlayerDeath(killerName) {
@@ -202,16 +237,23 @@ function shoot(nowMs) {
     state.lastShot = nowMs;
     return;
   }
+  // Recoil climbs while a burst runs and settles when the trigger rests: the
+  // climb term grows with consecutive shots and resets after 0.6 s of silence.
+  if (nowMs - state.lastShot > 600) state.shotsFired = 0;
   state.lastShot = nowMs;
   state.mag -= 1;
+  state.shotsFired += 1;
+  match.shotsFired += 1;
   scene.updateMatrixWorld(true); // meshes moved since the last render (staged shots)
   _origin.copy(camera.position);
+  const burstShots = state.shotsFired;
+  const spread = body.aiming ? def.adsSpread : def.spread;
   const results = fireHitscan({
     origin: _origin,
     yaw: body.yaw,
     pitch: body.pitch,
     def,
-    spread: def.spread,
+    spread,
     random,
     shootables,
     moving: player.groundSpeed() > 1.5,
@@ -226,11 +268,13 @@ function shoot(nowMs) {
     if (!result.hit) continue;
     anyHit = true;
     if (result.hit.actor) {
+      match.shotsHit += 1;
       const victim = result.hit.actor;
       const died = victim.damage(result.damage);
       result.killed = died;
       if (died) {
-        match.awardKill();
+        match.awardKill('You');
+        match.recordBotKill('You');
         match.addFeed(`You ▸ ${victim.name}${result.head ? ' (headshot)' : ''}`, 'A');
         hud.setMoney(match.money);
         audio.kill();
@@ -241,9 +285,11 @@ function shoot(nowMs) {
       checkRoundEnd();
     }
   }
-  if (!anyHit) { /* shot into the sky; the tracer still shows */ }
+  if (!anyHit) { /* shot into the night; the tracer still shows */ }
   audio.shot(def.kind);
-  player.recoil(def.recoil * (0.9 + random() * 0.2), (random() * 2 - 1) * def.recoil * 0.3);
+  // Kick: the base recoil plus a climb that grows through the burst.
+  const climb = def.climb * Math.min(burstShots, 12);
+  player.recoil(def.recoil * (0.9 + random() * 0.2) + climb, (random() * 2 - 1) * def.recoil * 0.3);
   viewmodel.onShot();
   hud.setAmmo(state.mag, state.reserve, false);
   hud.setWeapon(def.name, match.grenades);
@@ -253,6 +299,7 @@ function reloadWeapon() {
   const { def, state } = currentWeapon();
   if (state.reloading > 0 || state.mag >= def.mag || state.reserve <= 0) return;
   state.reloading = def.reloadMs;
+  state.shotsFired = 0;
   audio.reload();
   viewmodel.onReload();
   hud.setAmmo(state.mag, state.reserve, true);
@@ -267,6 +314,12 @@ function throwGrenade() {
     audio.click();
     hud.setWeapon(WEAPONS[match.current].name, match.grenades);
   }
+}
+
+function throwBotGrenade(actor, tx, tz) {
+  _origin.set(actor.position.x, actor.position.y + 1.4, actor.position.z);
+  _dir.set(tx - actor.position.x, 0, tz - actor.position.z).normalize();
+  grenades.throwGrenade(_origin, _dir, 12);
 }
 
 function onExplode(pos) {
@@ -284,15 +337,11 @@ function onExplode(pos) {
     if (!hasLineOfSight(_eye, _chest, world.shootables)) continue;
     const damage = GRENADE.damage * (1 - (dist / GRENADE.radius) * 0.75);
     if (victim.ref === 'player') {
-      body.health -= damage;
-      hud.setHealth(body.health);
+      const died = player.damage(damage);
+      hud.setHealth(body.health, body.armor);
       hud.damageFlash();
       audio.hurt();
-      if (body.health <= 0) {
-        body.health = 0;
-        body.alive = false;
-        onPlayerDeath('Spark Frag');
-      }
+      if (died) onPlayerDeath('Spark Frag');
     } else {
       const died = victim.ref.damage(damage);
       if (died) {
@@ -326,11 +375,14 @@ function fireBotShot(bot, spread) {
   const died = hit.actor.damage(damage);
   if (died) {
     match.addFeed(`${bot.actor.name} ▸ ${hit.actor.name}`, bot.team);
+    match.recordBotKill(bot.actor.name);
     checkRoundEnd();
   }
 }
 
 // The player is not an actor object, so bot shots at the player resolve here.
+// A headshot is halved by the Kevlar helmet; the HUD shows which way the shot
+// came from, so the player can turn on the shooter.
 function fireBotShotAtPlayer(bot, spread) {
   const actor = bot.actor;
   scene.updateMatrixWorld(true);
@@ -351,38 +403,53 @@ function fireBotShotAtPlayer(bot, spread) {
   // A wall between the bot and the player stops the bullet.
   if (hit.distance < _origin.distanceTo(_chest) - 0.6) return;
   if (!body.alive) return;
-  const damage = 24 * (hit.part === 'head' ? 2.2 : 1) * (hit.distance > 30 ? 0.7 : 1);
-  body.health -= damage;
-  hud.setHealth(body.health);
+  const isHead = hit.part === 'head';
+  let damage = 24 * (isHead ? 2.2 : 1) * (hit.distance > 30 ? 0.7 : 1);
+  if (isHead && match.hasHelmet) damage *= 0.5;
+  const died = player.damage(damage);
+  // Direction indicator: the shooter's bearing relative to where the player looks.
+  const dx = actor.position.x - body.position.x;
+  const dz = actor.position.z - body.position.z;
+  const bearing = Math.atan2(dx, dz);
+  const facing = Math.atan2(-Math.sin(body.yaw), -Math.cos(body.yaw));
+  let rel = ((bearing - facing) * 180) / Math.PI;
+  rel = ((rel + 540) % 360) - 180;
+  hud.damageDirection(rel);
+  hud.setHealth(body.health, body.armor);
   hud.damageFlash();
   audio.hurt();
-  if (body.health <= 0) {
-    body.health = 0;
-    body.alive = false;
-    onPlayerDeath(bot.actor.name);
-  }
+  if (died) onPlayerDeath(bot.actor.name);
 }
 
 // --- Bot context: the world the AI reads each step ---
+const botCtx = {
+  time: 0,
+  random,
+  graph,
+  sites: MAP.sites,
+  colliders: world.colliders,
+  player,
+  planted: false,
+  plantPos: null,
+  plantSite: null,
+  defuseBot: null,
+  hasLineOfSight: (from, to) => hasLineOfSight(from, to, world.shootables),
+  fireBotShot: (bot, spread) => {
+    if (bot.target === 'player') fireBotShotAtPlayer(bot, spread);
+    else fireBotShot(bot, spread);
+  },
+  throwBotGrenade: (actor, tx, tz) => throwBotGrenade(actor, tx, tz),
+  onPlantCall: (line) => match.addCallout(line),
+  onRotateCall: (line) => match.addCallout(line),
+};
+
 function botContext() {
-  return {
-    time,
-    random,
-    graph,
-    sites: MAP.sites,
-    colliders: world.colliders,
-    player,
-    planted: objective.state.planted,
-    plantPos: objective.state.planted ? objective.state.plantPos : null,
-    hasLineOfSight: (from, to) => hasLineOfSight(from, to, world.shootables),
-    fireBotShot: (bot, spread) => {
-      if (bot.target === 'player') fireBotShotAtPlayer(bot, spread);
-      else fireBotShot(bot, spread);
-    },
-    onDefused: () => {
-      if (match.phase === PHASE.LIVE) endRound('B', 'Charge defused.');
-    },
-  };
+  botCtx.time = time;
+  botCtx.planted = objective.state.planted;
+  botCtx.plantPos = objective.state.planted ? objective.state.plantPos : null;
+  botCtx.plantSite = objective.state.plantSite;
+  botCtx.defuseBot = null; // refreshed by updateBots every step
+  return botCtx;
 }
 
 // --- HUD wiring ---
@@ -411,11 +478,13 @@ buyMenu = hud.buildBuyMenu((id) => {
       hud.setAmmo(match.weapons[id].mag, match.weapons[id].reserve, false);
     }
     hud.setWeapon(WEAPONS[match.current].name, match.grenades);
+    hud.setHealth(body.health, match.armor);
+    body.armor = match.armor;
   } else {
     audio.dryFire();
   }
   hud.setMoney(match.money);
-  buyMenu.refresh(match.owned, match.money);
+  buyMenu.refresh(match.owned, match.money, match.armor, match.hasHelmet, match.grenades);
 }, () => {
   buyOpen = false;
   hud.showOverlay('none');
@@ -438,7 +507,7 @@ function toggleBuy() {
   if (match.phase !== PHASE.BUY) return;
   buyOpen = !buyOpen;
   if (buyOpen) {
-    buyMenu.refresh(match.owned, match.money);
+    buyMenu.refresh(match.owned, match.money, match.armor, match.hasHelmet, match.grenades);
     hud.showOverlay('buy');
     input.exitLock();
   } else {
@@ -468,10 +537,12 @@ function step(dt) {
     if (roundEndTimer <= 0 && roundOverlayShown) {
       roundOverlayShown = false;
       if (match.phase === PHASE.MATCH_END) {
+        const mvp = match.mvp();
+        const accuracy = match.shotsFired > 0 ? Math.round((match.shotsHit / match.shotsFired) * 100) : 0;
         hud.showOverlay('match', {
-          title: match.matchWinner === 'A' ? 'VANGUARD WINS THE MATCH' : match.matchWinner === 'B' ? 'EMBER WINS THE MATCH' : 'DRAW',
-          sub: `Final score ${match.winsA}–${match.winsB}. The yard is yours to run again.`,
-          stats: `Kills ${match.kills} · Deaths ${match.deaths} · $${match.money.toLocaleString('en-US')} banked`,
+          title: match.matchWinner === 'A' ? 'KESTREL WINS THE MATCH' : match.matchWinner === 'B' ? 'VULTURE WINS THE MATCH' : 'DRAW',
+          sub: `Final score ${match.winsA}–${match.winsB}. The terminal is yours to run again.`,
+          stats: `Kills ${match.kills} · Deaths ${match.deaths} · Accuracy ${accuracy}% · MVP ${mvp ? `${mvp.name} (${mvp.kills})` : '—'} · $${match.money.toLocaleString('en-US')} banked`,
         });
       } else {
         match.nextRound();
@@ -482,9 +553,10 @@ function step(dt) {
         hud.setWeapon(WEAPONS[match.current].name, match.grenades);
         const w = match.weapons[match.current];
         hud.setAmmo(w.mag, w.reserve, false);
-        hud.setHealth(100);
+        hud.setHealth(100, match.armor);
+        body.armor = match.armor;
         buyOpen = true;
-        buyMenu.refresh(match.owned, match.money);
+        buyMenu.refresh(match.owned, match.money, match.armor, match.hasHelmet, match.grenades);
         hud.showOverlay('buy');
         hud.setObjective('Buy phase — press B to open the shop, then deploy.');
       }
@@ -493,6 +565,7 @@ function step(dt) {
 
   // Player movement and weapon timers.
   player.step(dt, input.keys);
+  body.aiming = input.aiming && match.phase === PHASE.LIVE && body.alive;
   const { def, state } = currentWeapon();
   if (state.reloading > 0) {
     state.reloading -= dt * 1000;
@@ -506,18 +579,51 @@ function step(dt) {
     }
   }
 
-  // Objective: planting, and the planted charge's countdown + beeps.
-  if (match.phase === PHASE.LIVE && body.alive) {
+  // Footsteps: the player's own steps tick softly; an enemy bot's steps grow
+  // louder the closer it is, so a flank is heard before it is seen.
+  const speed = player.groundSpeed();
+  if (body.alive && speed > 2 && body.onGround) {
+    playerStepAcc += speed * dt;
+    if (playerStepAcc > 2.6) {
+      playerStepAcc = 0;
+      audio.step(0.7);
+    }
+  }
+  for (const bot of bots) {
+    if (bot.team !== 'B' || !bot.actor.alive) continue;
+    const moving = Math.hypot(bot.actor.velocity.x, bot.actor.velocity.z) > 0.5;
+    if (!moving) continue;
+    const dist = Math.hypot(bot.actor.position.x - body.position.x, bot.actor.position.z - body.position.z);
+    if (dist > 18) continue;
+    const last = botStepAt.get(bot) || 0;
+    if (time - last > 0.45) {
+      botStepAt.set(bot, time);
+      audio.step(1 - dist / 18);
+    }
+  }
+
+  // Bots move and fight in buy and live phases; the defuser reports through ctx.
+  if (match.phase === PHASE.BUY || match.phase === PHASE.LIVE) {
+    updateBots(bots, dt, botContext());
+  }
+
+  // Objective: planting, the planted charge's countdown and beeps, and a
+  // defender's defuse channel. It runs while the round is live even if the
+  // player is down, so a planted charge still blows while the squad fights on.
+  if (match.phase === PHASE.LIVE) {
+    const defuser = botCtx.defuseBot;
     const result = objective.step(dt, {
       playerX: body.position.x,
       playerZ: body.position.z,
-      holdingPlant: input.keys.has('KeyE'),
+      holdingPlant: body.alive && input.keys.has('KeyE'),
       hasCharge: match.hasCharge,
+      defuse: defuser ? { active: true, seconds: DEFUSE_SECONDS, who: defuser.actor.name } : null,
     });
     if (result === 'planted') {
       match.hasCharge = false;
       match.money += 300;
       match.addFeed('You planted the charge', 'A');
+      match.addCallout(`Charge planted at ${objective.state.plantSite} — hold the crossfire`);
       hud.setMoney(match.money);
       audio.plantBeep(true);
       hud.setObjective('CHARGE PLANTED — defend it until it blows!');
@@ -525,21 +631,22 @@ function step(dt) {
     } else if (result === 'detonated') {
       onExplode(objective.state.plantPos);
       endRound('A', 'Charge detonated at the site.');
+    } else if (result === 'defused') {
+      endRound('B', 'Charge defused.');
     }
     if (objective.state.planted && time >= nextBeepAt) {
       audio.plantBeep(false);
-      nextBeepAt = time + Math.max(0.25, objective.state.plantTimeLeft / 40);
+      nextBeepAt = time + Math.max(0.25, objective.state.plantTimeLeft / 35);
     }
-  }
-
-  // Bots move and fight in buy and live phases.
-  if (match.phase === PHASE.BUY || match.phase === PHASE.LIVE) {
-    updateBots(bots, dt, botContext());
+    if (objective.state.defuseProgress > 0 && time >= nextDefuseBeepAt) {
+      audio.defuseTick();
+      nextDefuseBeepAt = time + 0.5;
+    }
   }
 
   grenades.step(dt, onExplode);
   tracers.step(dt);
-  viewmodel.step(dt);
+  viewmodel.step(dt, body.aiming);
 
   // Track enemies the player can see, for the minimap.
   for (const bot of bots) {
@@ -560,19 +667,26 @@ function step(dt) {
 
   // HUD refresh.
   hud.setTimer(match.timer);
-  hud.setPlant(
-    match.phase === PHASE.LIVE && objective.state.plantProgress > 0 && !objective.state.planted
-      ? objective.state.plantProgress
-      : objective.state.planted
-        ? 1 - objective.state.plantTimeLeft / 40
-        : null,
-    objective.state.planted ? 'CHARGE — detonation in progress' : 'PLANTING… hold E',
-  );
-  const spreadPx = 6 + (def.spread + player.groundSpeed() * 0.004) * 900;
-  hud.setCrosshair(Math.min(34, spreadPx));
+  if (objective.state.planted && objective.state.defuseProgress > 0) {
+    hud.setPlant(objective.state.defuseProgress, `DEFUSING — ${objective.state.defuser || 'Vulture'} on the charge!`);
+  } else {
+    hud.setPlant(
+      match.phase === PHASE.LIVE && objective.state.plantProgress > 0 && !objective.state.planted
+        ? objective.state.plantProgress
+        : objective.state.planted
+          ? 1 - objective.state.plantTimeLeft / 35
+          : null,
+      objective.state.planted ? 'CHARGE — detonation in progress' : 'PLANTING… hold E',
+    );
+  }
+  const spreadPx = 6 + ((body.aiming ? def.adsSpread : def.spread) + player.groundSpeed() * 0.004) * 900;
+  hud.setCrosshair(Math.min(34, spreadPx), body.aiming);
+  hud.setCompass(body.yaw);
   hud.renderFeed(match.feed);
+  hud.renderCallouts(match.callouts);
+  hud.showScoreboard(input.scoreboardOpen && match.phase !== PHASE.MENU, scoreboardRows());
   const teammates = bots.filter((b) => b.team === 'A' && b.actor.alive).map((b) => ({ x: b.actor.position.x, z: b.actor.position.z }));
-  hud.drawMinimap(body.position, body.yaw, teammates, seenEnemies, time);
+  hud.drawMinimap(body.position, body.yaw, teammates, seenEnemies, time, objective.state.planted ? objective.state.plantPos : null);
 }
 
 function frame(now) {
@@ -595,7 +709,7 @@ function frame(now) {
         throwGrenade();
         input.keys.delete('KeyG');
       }
-      const digitMap = { Digit1: 'carbine', Digit2: 'dmr', Digit3: 'shotgun', Digit4: 'sidearm' };
+      const digitMap = { Digit1: 'sidearm', Digit2: 'smg', Digit3: 'carbine', Digit4: 'dmr', Digit5: 'shotgun' };
       for (const code of Object.keys(digitMap)) {
         if (input.keys.has(code)) {
           const id = digitMap[code];
@@ -632,13 +746,13 @@ function settle(steps) {
 function runShot(name) {
   hud.showOverlay('none');
   if (name === 'start') {
-    body.position.set(0, 0, 12);
+    body.position.set(0, 0, 15);
     body.yaw = -0.12;
     body.pitch = 0.01;
     match.timer = BUY_SECONDS;
     settle(20);
     hud.showOverlay('start');
-    hud.setHealth(100);
+    hud.setHealth(100, 0);
     hud.setAmmo(12, 48, false);
     hud.setWeapon('P9 Sidearm', 0);
     hud.setMoney(800);
@@ -652,20 +766,21 @@ function runShot(name) {
     match.money = 2700;
     beginLive();
     hud.showOverlay('none');
-    body.position.set(2.5, 0, 6);
+    body.position.set(2.5, 0, 8);
     body.yaw = 0;
     body.pitch = 0;
-    // Hold one defender still in the lane east of the mid pillar, so the staged
+    // Hold one defender still in the lane west of the gantry, so the staged
     // shots land on a visible target instead of a bot that walked away.
+    // (The east lane is blocked by the gantry leg from this camera.)
     const defender = bots.find((b) => b.team === 'B');
-    defender.actor.reset(3.5, -3, Math.PI);
+    defender.actor.reset(-3.5, -3, Math.PI);
     defender.state = 'hold';
     defender.path = [];
     defender.pathIndex = 0;
     defender.holdNode = 5;
     defender.holdUntil = 1e9;
     const mate = bots.find((b) => b.team === 'A');
-    mate.actor.reset(-3.5, 7, 0);
+    mate.actor.reset(4.5, 9, 0);
     settle(4);
     const target = new THREE.Vector3();
     for (let round = 0; round < 3; round += 1) {
@@ -677,12 +792,12 @@ function runShot(name) {
     }
     settle(6);
     hud.setMoney(match.money);
-    hud.setHealth(100);
+    hud.setHealth(100, 0);
   } else if (name === 'buy') {
     startMatch();
-    buyMenu.refresh(match.owned, match.money);
+    buyMenu.refresh(match.owned, match.money, match.armor, match.hasHelmet, match.grenades);
     hud.showOverlay('buy');
-    body.position.set(0, 0, 13);
+    body.position.set(0, 0, 16);
     body.yaw = 0;
     body.pitch = 0;
     settle(10);
@@ -693,7 +808,7 @@ function runShot(name) {
     match.winsB = 1;
     match.round = 3;
     match.kills = 7;
-    endRound('A', 'Ember team eliminated.');
+    endRound('A', 'Vulture team eliminated.');
     settle(5);
   }
   hud.setScore(match.winsA, match.winsB, match.round);
@@ -724,13 +839,13 @@ window.addEventListener('resize', () => {
 });
 
 // Menu is the opening state; the player starts the match from it.
-hud.setHealth(100);
+hud.setHealth(100, 0);
 hud.setAmmo(12, 48, false);
 hud.setWeapon('P9 Sidearm', 0);
 hud.setMoney(START_MONEY);
 hud.setScore(0, 0, 1);
 hud.setTimer(BUY_SECONDS);
-hud.setObjective('Plant the charge at A (Foundry) or B (Crane Yard) — or wipe the Ember team.');
+hud.setObjective('Plant the charge at A (Depot) or B (Silos) — or wipe the Vulture team.');
 hud.showOverlay('start');
 syncCamera();
 if (shot) runShot(shot);

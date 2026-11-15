@@ -1,8 +1,12 @@
-// Match state: one object owns the whole match — phase, rounds, money, loadout
-// and the kill feed — so the loop in main.js only ever reads and asks it to move.
-// First to 5 rounds takes the match (9 rounds max). The player attacks every
-// round: plant the charge at Foundry or the Crane Yard, or wipe the Ember team.
-import { WEAPONS, GRENADE, makeWeaponState } from './weapons.js';
+// Match state: one object owns the whole match — phase, rounds, money, loadout,
+// armour, the defuse kit, per-fighter kills and the kill feed — so the loop in
+// main.js only ever reads it and asks it to move. First to 5 rounds takes the
+// match (9 rounds max). Kestrel attacks every round: plant the charge at the
+// Depot or the Silos, or wipe the Vulture team. Defenders can defuse a planted
+// charge; buy a kit and it takes half the time.
+// The round plan is the IGL's call for the round: which site the squad hits,
+// which lane the lurker fakes, and the line the HUD shows the player.
+import { WEAPONS, GRENADE, ARMOR, HELMET, makeWeaponState } from './weapons.js';
 
 export const PHASE = {
   MENU: 'menu',
@@ -12,7 +16,7 @@ export const PHASE = {
   MATCH_END: 'matchEnd',
 };
 
-export const BUY_SECONDS = 15;
+export const BUY_SECONDS = 20;
 export const ROUND_SECONDS = 100;
 export const WIN_ROUNDS = 5;
 export const MAX_ROUNDS = 9;
@@ -29,14 +33,21 @@ export function createMatch() {
     owned: ['sidearm'],
     current: 'sidearm',
     grenades: 0,
+    armor: 0,
+    hasHelmet: false,
     hasCharge: true,
     kills: 0,
     deaths: 0,
-    feed: [], // {text, team, time}
+    shotsFired: 0,
+    shotsHit: 0,
+    feed: [], // {text, team, at}
+    callouts: [], // {text, at} — radio lines from the squad, newest first
+    plan: null, // {site, fake, line}
     roundEndAt: 0,
     matchWinner: null,
     lastRoundReason: '',
     weapons: { sidearm: makeWeaponState('sidearm') },
+    killsBy: {}, // name -> kills this match
   };
 
   function resetMatch() {
@@ -47,11 +58,18 @@ export function createMatch() {
     match.owned = ['sidearm'];
     match.current = 'sidearm';
     match.grenades = 0;
+    match.armor = 0;
+    match.hasHelmet = false;
     match.hasCharge = true;
     match.kills = 0;
     match.deaths = 0;
+    match.shotsFired = 0;
+    match.shotsHit = 0;
     match.feed = [];
+    match.callouts = [];
+    match.plan = null;
     match.matchWinner = null;
+    match.killsBy = {};
     match.weapons = { sidearm: makeWeaponState('sidearm') };
   }
 
@@ -59,13 +77,14 @@ export function createMatch() {
     match.phase = PHASE.BUY;
     match.timer = BUY_SECONDS;
     match.hasCharge = true;
-    // Fresh ammo every round; bought guns stay bought.
+    // Fresh ammo every round; bought guns and gear stay bought.
     for (const id of match.owned) {
       const def = WEAPONS[id];
       const state = match.weapons[id];
       state.mag = def.mag;
       state.reserve = def.reserve;
       state.reloading = 0;
+      state.shotsFired = 0;
     }
   }
 
@@ -79,14 +98,22 @@ export function createMatch() {
     if (match.feed.length > 5) match.feed.length = 5;
   }
 
-  function awardKill() {
+  function addCallout(text) {
+    match.callouts.unshift({ text, at: performance.now() });
+    if (match.callouts.length > 3) match.callouts.length = 3;
+  }
+
+  function awardKill(killerName) {
     match.money += 300;
     match.kills += 1;
+    if (killerName) match.killsBy[killerName] = (match.killsBy[killerName] || 0) + 1;
+  }
+
+  function recordBotKill(name) {
+    match.killsBy[name] = (match.killsBy[name] || 0) + 1;
   }
 
   function buy(id) {
-    const def = WEAPONS[id] || (id === 'grenade' ? GRENADE : null);
-    if (!def) return 'unknown';
     if (id === 'grenade') {
       if (match.grenades >= GRENADE.maxCarry) return 'maxed';
       if (match.money < GRENADE.price) return 'poor';
@@ -94,6 +121,22 @@ export function createMatch() {
       match.grenades += 1;
       return 'ok';
     }
+    if (id === 'armor') {
+      if (match.armor >= ARMOR.points) return 'maxed';
+      if (match.money < ARMOR.price) return 'poor';
+      match.money -= ARMOR.price;
+      match.armor = ARMOR.points;
+      return 'ok';
+    }
+    if (id === 'helmet') {
+      if (match.hasHelmet) return 'owned';
+      if (match.money < HELMET.price) return 'poor';
+      match.money -= HELMET.price;
+      match.hasHelmet = true;
+      return 'ok';
+    }
+    const def = WEAPONS[id];
+    if (!def) return 'unknown';
     if (match.owned.includes(id)) return 'owned';
     if (match.money < def.price) return 'poor';
     match.money -= def.price;
@@ -130,8 +173,20 @@ export function createMatch() {
     startRound();
   }
 
+  function mvp() {
+    let best = null;
+    let bestKills = -1;
+    for (const [name, kills] of Object.entries(match.killsBy)) {
+      if (kills > bestKills) { bestKills = kills; best = name; }
+    }
+    return best ? { name: best, kills: bestKills } : null;
+  }
+
   // Attach the operations to the match object itself (not a spread copy), so
   // callers reading match.phase see every transition the methods make.
-  Object.assign(match, { resetMatch, startRound, beginLive, addFeed, awardKill, buy, selectWeapon, endRound, nextRound });
+  Object.assign(match, {
+    resetMatch, startRound, beginLive, addFeed, addCallout, awardKill, recordBotKill,
+    buy, selectWeapon, endRound, nextRound, mvp,
+  });
   return match;
 }

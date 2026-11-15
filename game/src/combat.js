@@ -2,8 +2,11 @@
 // objective. One shared Raycaster, reused every shot, so the hot path allocates
 // nothing. A shot is a ray against world meshes and actor hit meshes; the first
 // hit decides — a wall stops a bullet, a head pays more (see weapons.js).
+// The objective is the round: attackers plant in 3 seconds, the charge blows in
+// 35, defenders defuse in 5 (2.5 with a kit). A defuse channel breaks the
+// moment the defuser takes damage or moves off the charge.
 import * as THREE from 'three';
-import { weaponDamage } from './weapons.js';
+import { weaponDamage, PLANT_SECONDS, DETONATE_SECONDS, DEFUSE_SECONDS } from './weapons.js';
 
 const _ray = new THREE.Raycaster();
 const _origin = new THREE.Vector3();
@@ -39,7 +42,8 @@ export function hasLineOfSight(from, to, worldMeshes) {
 }
 
 // Fire one hitscan shot from a weapon. Returns a report the caller turns into
-// damage, hitmarkers, tracers and sound. `spread` is the cone half-angle.
+// damage, hitmarkers, tracers and sound. `spread` is the cone half-angle; ADS
+// is passed in already folded into it by the caller.
 export function fireHitscan(opts) {
   const { origin, yaw, pitch, def, spread, random, shootables, moving } = opts;
   const results = [];
@@ -69,7 +73,7 @@ export function fireHitscan(opts) {
 
 // --- Tracers: a pooled LineSegments set, one segment per shot, fading fast. ---
 export function createTracers(scene) {
-  const MAX = 24;
+  const MAX = 32;
   const positions = new Float32Array(MAX * 6);
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -196,14 +200,17 @@ export function createGrenades(scene, colliders, worldMeshes) {
   return { throwGrenade, step, count: () => live.length };
 }
 
-// --- The charge objective: plant in a site, defend the beeping charge, win. ---
+// --- The charge objective: plant in a site, defend the beeping charge, win or
+// lose it to a defuse. Returns 'planted' / 'detonated' / 'defused' / null. ---
 export function createObjective(sites) {
   const state = {
     planted: false,
     plantSite: null,
     plantPos: new THREE.Vector3(),
     plantProgress: 0, // 0..1 while channelling
-    plantTimeLeft: 40,
+    plantTimeLeft: DETONATE_SECONDS,
+    defuseProgress: 0, // 0..1 while a defender channels on the charge
+    defuser: null, // bot currently defusing, or 'player'
     beepAt: 0,
   };
 
@@ -215,17 +222,19 @@ export function createObjective(sites) {
     return null;
   }
 
-  // Returns 'planted' when the channel completes, 'detonated' when the timer ends.
+  // Planting: only the player (or an attacker bot carrying the charge) can
+  // channel, and only inside a site. Defusing is driven by the caller's
+  // `defuse` input: { active, seconds } — the channel breaks if it stops.
   function step(dt, input) {
     if (!state.planted) {
       const site = siteAt(input.playerX, input.playerZ);
       if (site && input.holdingPlant && input.hasCharge) {
-        state.plantProgress += dt / 3.5;
+        state.plantProgress += dt / PLANT_SECONDS;
         if (state.plantProgress >= 1) {
           state.planted = true;
           state.plantSite = site;
           state.plantPos.set(input.playerX, 0, input.playerZ);
-          state.plantTimeLeft = 40;
+          state.plantTimeLeft = DETONATE_SECONDS;
           state.plantProgress = 0;
           return 'planted';
         }
@@ -234,7 +243,20 @@ export function createObjective(sites) {
       }
       return null;
     }
+    // Planted: count down, and track a defuse channel if one is running.
     state.plantTimeLeft -= dt;
+    if (input.defuse && input.defuse.active) {
+      state.defuser = input.defuse.who || 'player';
+      state.defuseProgress += dt / (input.defuse.seconds || DEFUSE_SECONDS);
+      if (state.defuseProgress >= 1) {
+        state.defuseProgress = 0;
+        state.defuser = null;
+        return 'defused';
+      }
+    } else {
+      state.defuseProgress = 0;
+      state.defuser = null;
+    }
     if (state.plantTimeLeft <= 0) return 'detonated';
     return null;
   }
@@ -243,7 +265,9 @@ export function createObjective(sites) {
     state.planted = false;
     state.plantSite = null;
     state.plantProgress = 0;
-    state.plantTimeLeft = 40;
+    state.plantTimeLeft = DETONATE_SECONDS;
+    state.defuseProgress = 0;
+    state.defuser = null;
   }
 
   return { state, siteAt, step, reset };
