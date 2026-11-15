@@ -1,21 +1,27 @@
 // Bot AI: a 5v5 squad with roles, not five lone wolves. Each round the IGL
-// (the first attacker bot) calls a plan — which site the squad hits, which lane
-// the lurker fakes — and the squad executes it together: the entry goes in
-// first, support trades the entry's death, the lurker draws defenders to the
-// other site, the AWPer holds the long angle with a DMR. Defenders anchor their
+// calls a plan — which site the squad hits, which lane the lurker fakes — and
+// the squad executes it together: the entry goes in first, support trades the
+// entry's death, the lurker draws defenders to the other site with noise and
+// smoke, the AWPer holds the long angle with a DMR. Defenders anchor their
 // sites and a mid roamer, and when the charge is planted they retake together
 // instead of trickling in one by one. Bots radio what they do, so the player
 // reads the plan in the feed instead of guessing.
-// Fights: a reaction delay, then bursts with spread that grows with distance and
-// movement, so a bot that catches you sprinting across mid still has to earn the
-// kill. Difficulty climbs with the round: defenders sharpen a little every round
-// the player loses, so a match that snowballs still stays honest.
+// Fights: a reaction delay, then bursts with spread that grows with distance
+// and movement, so a bot that catches you sprinting across mid still has to
+// earn the kill. Bots HEAR: a gunshot or an explosion within 26 m pulls a bot
+// with no target over to investigate. Bots USE smoke: the lurker screens the
+// fake site, defenders smoke the retake, the carrier smokes the plant.
+// The charge has a carrier: while the player attacks and lives, the player
+// carries it; if the player is down — or after the half-time side swap, when
+// the player defends — the IGL bot carries it and plants it alone, so a round
+// is never unwinnable because the carrier died. Difficulty climbs with the
+// round: defenders sharpen a little every round the player loses.
 import * as THREE from 'three';
-import { findPath } from './map.js';
+import { findPath, groundHeightAt } from './map.js';
 import { moveBox } from './actors.js';
 
-const BOT_NAMES_A = ['Rook', 'Sable', 'Iris', 'Hawk', 'Wren']; // Kestrel attackers
-const BOT_NAMES_B = ['Cinder', 'Ash', 'Flint', 'Onyx', 'Ember']; // Vulture defenders
+const BOT_NAMES_A = ['Rook', 'Sable', 'Iris', 'Hawk', 'Wren']; // Meridian attackers
+const BOT_NAMES_B = ['Cinder', 'Ash', 'Flint', 'Onyx', 'Ember']; // Breakwater defenders
 const ROLES_A = ['igl', 'entry', 'support', 'lurker', 'awper'];
 const ROLES_B = ['anchor', 'anchor', 'anchor', 'roamer', 'anchor'];
 
@@ -27,6 +33,9 @@ const CALLS = {
   defuse: (name) => `${name}: defusing the charge`,
   retake: 'Retake together — two in, two hold the flank',
   lurker: (name, site) => `${name}: making noise at ${site}`,
+  smoke: (name, site) => `${name}: smoke out at ${site}`,
+  swap: 'Sides swap — Meridian defends now. Hold the sites.',
+  investigate: (name) => `${name}: checking that noise`,
 };
 
 function makeBot(actor, team, skill, role) {
@@ -54,6 +63,11 @@ function makeBot(actor, team, skill, role) {
     defusing: false,
     defuseProgress: 0,
     grenadeThrown: false,
+    smokeThrown: false,
+    planting: false,
+    plantProgress: 0,
+    investigateUntil: 0,
+    investigatePos: new THREE.Vector3(),
     speed: 3.1 + skill * 1.1,
   };
 }
@@ -71,9 +85,19 @@ export function createBots(scene, createActor, graph, sites) {
   return bots;
 }
 
+// Swap the two squads' teams at half-time: the first five bots become the
+// defence, the second five become the attack. Roles travel with the bot.
+export function swapTeams(bots) {
+  for (const bot of bots) {
+    bot.team = bot.team === 'A' ? 'B' : 'A';
+    bot.actor.team = bot.team;
+  }
+}
+
 // The IGL calls the round: attackers hit one site together, the lurker fakes
 // the other, the AWPer posts up on the long angle into the site. Defenders
 // split: two anchor A, two anchor B, the roamer holds mid and swings to noise.
+// From round 2 the defence buys plate vests; from round 3 the attack does too.
 export function assignRound(bots, random, roundNumber, callout) {
   const sitePick = random() < 0.55 ? 'A' : 'B';
   const fakeSite = sitePick === 'A' ? 'B' : 'A';
@@ -85,11 +109,17 @@ export function assignRound(bots, random, roundNumber, callout) {
     bot.defusing = false;
     bot.defuseProgress = 0;
     bot.grenadeThrown = false;
+    bot.smokeThrown = false;
+    bot.planting = false;
+    bot.plantProgress = 0;
+    bot.investigateUntil = 0;
     bot.holdUntil = 0;
     // Difficulty curve: every round sharpens the defence a touch.
     const curve = Math.min(0.15, (roundNumber - 1) * 0.025);
     bot.skill = Math.min(0.98, bot.skill + (bot.team === 'B' ? curve : curve * 0.5));
     bot.speed = 3.1 + bot.skill * 1.1;
+    // Economy: vests appear as the match wears on.
+    bot.actor.armor = (bot.team === 'B' && roundNumber >= 2) || (bot.team === 'A' && roundNumber >= 3) ? 50 : 0;
     if (bot.team === 'A') {
       if (bot.role === 'lurker') bot.site = fakeSite;
       else if (bot.role === 'awper') bot.site = sitePick;
@@ -118,7 +148,19 @@ function nearestNode(graph, x, z) {
 }
 
 // Pick a hold spot near a site: a node inside the site, or the closest to it.
-function holdNodeFor(graph, site, sites) {
+// The AWPer sometimes takes the gantry deck instead, for the high ground.
+function holdNodeFor(graph, site, sites, random, preferDeck) {
+  if (preferDeck && random() < 0.45) {
+    const deckNodes = [30, 31, 32];
+    const target = sites[site];
+    let best = deckNodes[0];
+    let bestD = Infinity;
+    for (const n of deckNodes) {
+      const d = Math.abs(graph.nodes[n][0] - target.cx);
+      if (d < bestD) { bestD = d; best = n; }
+    }
+    return best;
+  }
   if (site === 'mid') return nearestNode(graph, 0, -7);
   const target = sites[site];
   return nearestNode(graph, target.cx, target.cz);
@@ -131,17 +173,26 @@ const _dir = new THREE.Vector3();
 export function updateBots(bots, dt, ctx) {
   const {
     time, random, graph, sites, colliders, player, hasLineOfSight, fireBotShot,
-    planted, plantPos, plantSite, onDefused, onPlantCall, onRotateCall,
-    throwBotGrenade, hasKit,
+    planted, plantPos, plantSite, onPlantCall, onRotateCall,
+    throwBotGrenade, throwBotSmoke, noiseEvents, playerTeam, canFight,
   } = ctx;
+  ctx.plantingBot = null;
+  ctx.defuseBot = null;
+
+  // The carrier: the IGL attacker bot carries the charge whenever the player
+  // is not carrying it (player down, or player defending after the swap).
+  const carrier = bots.find((b) => b.team === 'A' && b.role === 'igl' && b.actor.alive)
+    || bots.find((b) => b.team === 'A' && b.actor.alive);
 
   for (const bot of bots) {
     const actor = bot.actor;
     if (!actor.alive) continue;
 
-    // --- Pick the nearest living enemy the bot can see. ---
+    // --- Pick the nearest living enemy the bot can see (smoke blocks sight). ---
     const enemies = [];
-    if (player.state.alive) enemies.push({ ref: 'player', pos: player.state.position, eye: player.state.eye });
+    // The player is an enemy ONLY when this bot is on the other team.
+    // (A teammate bot must never target or shoot the player.)
+    if (player.state.alive && bot.team !== playerTeam) enemies.push({ ref: 'player', pos: player.state.position, eye: player.state.eye });
     for (const other of bots) {
       if (other.team !== bot.team && other.actor.alive) enemies.push({ ref: other.actor, pos: other.actor.position, eye: other.actor.eyeHeight });
     }
@@ -166,16 +217,61 @@ export function updateBots(bots, dt, ctx) {
       bot.target = null;
     }
 
-    // --- The lurker fires a grenade at the fake site, to sell the bluff. ---
-    if (bot.role === 'lurker' && !bot.grenadeThrown && bot.state === 'advance' && throwBotGrenade) {
+    // --- Hear: a recent loud noise with no target pulls the bot over. ---
+    if (!bot.target && noiseEvents) {
+      for (const noise of noiseEvents) {
+        if (time - noise.at > 3) continue;
+        const dist = Math.hypot(noise.x - actor.position.x, noise.z - actor.position.z);
+        if (dist < 26 && dist > 4) {
+          bot.investigatePos.set(noise.x, 0, noise.z);
+          bot.investigateUntil = time + 3;
+          if (onRotateCall) onRotateCall(CALLS.investigate(actor.name));
+          break;
+        }
+      }
+    }
+
+    // --- The lurker fires a grenade and a smoke at the fake site, to sell it. ---
+    if (bot.role === 'lurker' && bot.state === 'advance') {
       const site = sites[bot.site];
-      const dx = site.cx - actor.position.x;
-      const dz = site.cz - actor.position.z;
-      if (Math.hypot(dx, dz) < 18) {
+      const distToSite = Math.hypot(site.cx - actor.position.x, site.cz - actor.position.z);
+      if (!bot.grenadeThrown && distToSite < 18 && throwBotGrenade) {
         bot.grenadeThrown = true;
         throwBotGrenade(actor, site.cx, site.cz);
         if (onRotateCall) onRotateCall(CALLS.lurker(actor.name, bot.site));
       }
+      if (!bot.smokeThrown && distToSite < 14 && throwBotSmoke) {
+        bot.smokeThrown = true;
+        throwBotSmoke(actor, site.cx, site.cz);
+        if (onRotateCall) onRotateCall(CALLS.smoke(actor.name, bot.site));
+      }
+    }
+
+    // --- Plant: the carrier plants the charge when the player is not carrying. ---
+    const playerCarries = playerTeam === 'A' && player.state.alive;
+    if (bot.team === 'A' && carrier === bot && !playerCarries && !planted) {
+      const site = sites[bot.site || 'A'];
+      const dist = Math.hypot(site.cx - actor.position.x, site.cz - actor.position.z);
+      if (dist < 3.5) {
+        // In the site: smoke the approach, then channel the plant.
+        if (!bot.smokeThrown && throwBotSmoke) {
+          bot.smokeThrown = true;
+          throwBotSmoke(actor, site.cx, site.cz + 4);
+        }
+        bot.planting = true;
+        bot.state = 'plant';
+        actor.velocity.set(0, 0, 0);
+        actor.yaw = Math.atan2(-(site.cx - actor.position.x), -(site.cz - actor.position.z));
+        ctx.plantingBot = bot;
+        actor.syncMesh();
+        settleHeight(actor, dt);
+        continue;
+      }
+      bot.planting = false;
+      bot.state = 'advance';
+      bot.site = bot.site || 'A';
+    } else {
+      bot.planting = false;
     }
 
     // --- Defuse: when the charge is planted, defenders retake as a pair. ---
@@ -190,6 +286,12 @@ export function updateBots(bots, dt, ctx) {
         return !best || d < best.d ? { bot: b, d } : best;
       }, null);
       if (closest && closest.bot === bot) {
+        // Smoke the site on the way in, once, to screen the defuse.
+        if (!bot.smokeThrown && dist < 12 && throwBotSmoke) {
+          bot.smokeThrown = true;
+          throwBotSmoke(actor, plantPos.x, plantPos.z);
+          if (onRotateCall) onRotateCall(CALLS.smoke(actor.name, plantSite || 'A'));
+        }
         if (dist < 1.6) {
           if (!bot.defusing && onPlantCall) onPlantCall(CALLS.defuse(actor.name));
           bot.state = 'defuse';
@@ -200,6 +302,7 @@ export function updateBots(bots, dt, ctx) {
           actor.syncMesh();
           // The channel itself is reported to main.js through ctx.defuseBot.
           ctx.defuseBot = bot;
+          settleHeight(actor, dt);
           continue;
         }
         bot.state = 'rotate';
@@ -209,6 +312,7 @@ export function updateBots(bots, dt, ctx) {
           // through to the combat section below instead of walking on.
         } else {
           moveAlong(bot, plantPos.x, plantPos.z, dt, ctx);
+          settleHeight(actor, dt);
           continue;
         }
       }
@@ -219,6 +323,7 @@ export function updateBots(bots, dt, ctx) {
         const holdZ = angle.cz + 5;
         if (Math.hypot(holdX - actor.position.x, holdZ - actor.position.z) > 1.5) {
           moveAlong(bot, holdX, holdZ, dt, ctx);
+          settleHeight(actor, dt);
           continue;
         }
       }
@@ -236,7 +341,8 @@ export function updateBots(bots, dt, ctx) {
           bot.burstLeft = bot.role === 'awper' ? 1 : 3 + Math.floor(random() * 3);
           bot.pauseUntil = time + (bot.role === 'awper' ? 0.9 : 0.55) + random() * 0.45;
         }
-        if (time >= bot.nextShotAt && bot.burstLeft > 0) {
+        // Buy phase is safe: bots hold and aim, but nobody fires until live.
+        if (time >= bot.nextShotAt && bot.burstLeft > 0 && canFight) {
           bot.nextShotAt = time + (bot.role === 'awper' ? 0.5 : 0.115);
           bot.burstLeft -= 1;
           const dist = Math.hypot(dx, dz);
@@ -256,6 +362,7 @@ export function updateBots(bots, dt, ctx) {
       actor.velocity.z = -sin * strafeSpeed;
       moveBox(actor.position, actor.velocity, dt, colliders);
       actor.syncMesh();
+      settleHeight(actor, dt);
       continue;
     }
     if (bot.target) {
@@ -265,14 +372,26 @@ export function updateBots(bots, dt, ctx) {
       actor.yaw = Math.atan2(-dx, -dz);
       actor.velocity.set(0, 0, 0);
       actor.syncMesh();
+      settleHeight(actor, dt);
       continue;
     }
     bot.reactUntil = 0;
 
+    // --- Investigate a noise: walk to it, look around, then resume. ---
+    if (time < bot.investigateUntil && bot.state !== 'defuse') {
+      if (moveAlong(bot, bot.investigatePos.x, bot.investigatePos.z, dt, ctx)) {
+        bot.investigateUntil = 0;
+        actor.yaw += dt * 1.2;
+      }
+      actor.syncMesh();
+      settleHeight(actor, dt);
+      continue;
+    }
+
     // --- Navigation: follow the path, or hold a position. ---
     if (bot.state === 'hold') {
       if (bot.holdNode === -1) {
-        bot.holdNode = holdNodeFor(graph, bot.site, sites);
+        bot.holdNode = holdNodeFor(graph, bot.site, sites, random, bot.role === 'awper');
         bot.path = findPath(graph, actor.position.x, actor.position.z, graph.nodes[bot.holdNode][0], graph.nodes[bot.holdNode][1]);
         bot.pathIndex = 0;
       }
@@ -293,6 +412,7 @@ export function updateBots(bots, dt, ctx) {
         }
       }
       actor.syncMesh();
+      settleHeight(actor, dt);
       continue;
     }
 
@@ -313,6 +433,7 @@ export function updateBots(bots, dt, ctx) {
         bot.holdUntil = time + 4;
         actor.velocity.set(0, 0, 0);
         actor.syncMesh();
+        settleHeight(actor, dt);
         continue;
       }
       if (bot.pathIndex < bot.path.length) {
@@ -324,12 +445,14 @@ export function updateBots(bots, dt, ctx) {
         bot.holdUntil = time + 2 + random() * 3;
       }
       actor.syncMesh();
+      settleHeight(actor, dt);
       continue;
     }
 
-    // defuse state handled above; anything else stands and scans.
+    // defuse / plant state handled above; anything else stands and scans.
     actor.velocity.set(0, 0, 0);
     actor.syncMesh();
+    settleHeight(actor, dt);
   }
 
   function moveAlong(bot, tx, tz, dt, ctx2) {
@@ -344,6 +467,17 @@ export function updateBots(bots, dt, ctx) {
     actor.yaw = Math.atan2(-dx, -dz);
     moveBox(actor.position, actor.velocity, dt, ctx2.colliders);
     return false;
+  }
+
+  // Keep the bot on the floor it stands on: snap up onto a step or the deck,
+  // fall back to the quay when it walks off an edge.
+  function settleHeight(actor, dt) {
+    const support = groundHeightAt(actor.position.x, actor.position.z);
+    if (actor.position.y > support + 0.05) {
+      actor.position.y = Math.max(support, actor.position.y - 12 * dt);
+    } else if (actor.position.y < support - 0.02) {
+      actor.position.y = support;
+    }
   }
 }
 

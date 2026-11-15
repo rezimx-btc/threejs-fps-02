@@ -1,12 +1,15 @@
-// Combat: the hitscan core, line-of-sight tests, grenades and the charge
-// objective. One shared Raycaster, reused every shot, so the hot path allocates
-// nothing. A shot is a ray against world meshes and actor hit meshes; the first
-// hit decides — a wall stops a bullet, a head pays more (see weapons.js).
+// Combat: the hitscan core, line-of-sight tests, grenades, smoke-aware vision
+// and the charge objective. One shared Raycaster, reused every shot, so the hot
+// path allocates nothing. A shot is a ray against world meshes and actor hit
+// meshes; the first hit decides — a wall stops a bullet, a head pays more (see
+// weapons.js). Smoke blocks SIGHT but not bullets: a bot cannot see or shoot
+// through a cloud, yet a bullet flies straight through it.
 // The objective is the round: attackers plant in 3 seconds, the charge blows in
-// 35, defenders defuse in 5 (2.5 with a kit). A defuse channel breaks the
-// moment the defuser takes damage or moves off the charge.
+// 35, defenders defuse in 5 (2.5 with a kit). The charge is carried by the
+// player — or, if the player is down, by the IGL bot, who plants it alone. A
+// defuse channel breaks the moment the defuser takes damage or moves off.
 import * as THREE from 'three';
-import { weaponDamage, PLANT_SECONDS, DETONATE_SECONDS, DEFUSE_SECONDS } from './weapons.js';
+import { weaponDamage, PLANT_SECONDS, DETONATE_SECONDS, DEFUSE_SECONDS, DEFUSE_KIT_SECONDS } from './weapons.js';
 
 const _ray = new THREE.Raycaster();
 const _origin = new THREE.Vector3();
@@ -30,7 +33,10 @@ export function raycastShot(origin, direction, shootables, maxDist = 90) {
   };
 }
 
-export function hasLineOfSight(from, to, worldMeshes) {
+// Line of sight: no wall in the way AND no smoke cloud in the way. The smoke
+// test is a caller-supplied `blocksSight(from, to)`; without it, plain walls.
+export function hasLineOfSight(from, to, worldMeshes, blocksSight = null) {
+  if (blocksSight && blocksSight(from, to)) return false;
   _to.copy(to).sub(from);
   const dist = _to.length();
   if (dist < 0.01) return true;
@@ -42,8 +48,8 @@ export function hasLineOfSight(from, to, worldMeshes) {
 }
 
 // Fire one hitscan shot from a weapon. Returns a report the caller turns into
-// damage, hitmarkers, tracers and sound. `spread` is the cone half-angle; ADS
-// is passed in already folded into it by the caller.
+// damage, hitmarkers, tracers and sound. `spread` is the cone half-angle; ADS,
+// crouch and stillness are already folded into it by the caller.
 export function fireHitscan(opts) {
   const { origin, yaw, pitch, def, spread, random, shootables, moving } = opts;
   const results = [];
@@ -112,6 +118,48 @@ export function createTracers(scene) {
       }
     }
     material.opacity = any ? 0.9 : 0;
+  }
+
+  return { add, step };
+}
+
+// --- Impact sparks: one pooled Points cloud, a spark burst where a bullet
+// lands on the world, so a miss still reads on screen. ---
+export function createImpacts(scene) {
+  const MAX = 48;
+  const positions = new Float32Array(MAX * 3);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const material = new THREE.PointsMaterial({ color: 0xffc46b, size: 0.14, transparent: true, opacity: 0.95, sizeAttenuation: true });
+  const points = new THREE.Points(geometry, material);
+  points.frustumCulled = false;
+  scene.add(points);
+  const lives = new Float32Array(MAX);
+  let cursor = 0;
+
+  function add(at) {
+    const i = cursor;
+    cursor = (cursor + 1) % MAX;
+    positions[i * 3] = at.x;
+    positions[i * 3 + 1] = at.y;
+    positions[i * 3 + 2] = at.z;
+    lives[i] = 0.18;
+    geometry.attributes.position.needsUpdate = true;
+  }
+
+  function step(dt) {
+    let any = false;
+    for (let i = 0; i < MAX; i += 1) {
+      if (lives[i] > 0) {
+        lives[i] -= dt;
+        if (lives[i] <= 0) {
+          positions[i * 3 + 1] = -50;
+          geometry.attributes.position.needsUpdate = true;
+        }
+        any = true;
+      }
+    }
+    material.opacity = any ? 0.95 : 0;
   }
 
   return { add, step };
@@ -202,6 +250,9 @@ export function createGrenades(scene, colliders, worldMeshes) {
 
 // --- The charge objective: plant in a site, defend the beeping charge, win or
 // lose it to a defuse. Returns 'planted' / 'detonated' / 'defused' / null. ---
+// The planter is whoever carries the charge: the player (holdingPlant), or an
+// attacker bot standing in the site (botPlant = {x, z, active}). A kit makes
+// the defuse channel run in DEFUSE_KIT_SECONDS instead of DEFUSE_SECONDS.
 export function createObjective(sites) {
   const state = {
     planted: false,
@@ -222,18 +273,21 @@ export function createObjective(sites) {
     return null;
   }
 
-  // Planting: only the player (or an attacker bot carrying the charge) can
-  // channel, and only inside a site. Defusing is driven by the caller's
-  // `defuse` input: { active, seconds } — the channel breaks if it stops.
   function step(dt, input) {
     if (!state.planted) {
-      const site = siteAt(input.playerX, input.playerZ);
-      if (site && input.holdingPlant && input.hasCharge) {
+      const planting = (input.holdingPlant && input.hasCharge && siteAt(input.playerX, input.playerZ))
+        || (input.botPlant && input.botPlant.active && siteAt(input.botPlant.x, input.botPlant.z));
+      const site = planting
+        ? siteAt(input.playerX, input.playerZ) || siteAt(input.botPlant.x, input.botPlant.z)
+        : null;
+      if (planting && site) {
         state.plantProgress += dt / PLANT_SECONDS;
         if (state.plantProgress >= 1) {
           state.planted = true;
           state.plantSite = site;
-          state.plantPos.set(input.playerX, 0, input.playerZ);
+          const px = input.botPlant && input.botPlant.active ? input.botPlant.x : input.playerX;
+          const pz = input.botPlant && input.botPlant.active ? input.botPlant.z : input.playerZ;
+          state.plantPos.set(px, 0, pz);
           state.plantTimeLeft = DETONATE_SECONDS;
           state.plantProgress = 0;
           return 'planted';
@@ -247,7 +301,8 @@ export function createObjective(sites) {
     state.plantTimeLeft -= dt;
     if (input.defuse && input.defuse.active) {
       state.defuser = input.defuse.who || 'player';
-      state.defuseProgress += dt / (input.defuse.seconds || DEFUSE_SECONDS);
+      const seconds = input.defuse.hasKit ? DEFUSE_KIT_SECONDS : (input.defuse.seconds || DEFUSE_SECONDS);
+      state.defuseProgress += dt / seconds;
       if (state.defuseProgress >= 1) {
         state.defuseProgress = 0;
         state.defuser = null;

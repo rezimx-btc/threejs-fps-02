@@ -3,6 +3,7 @@
 // is created lazily on the first user gesture (browsers block audio before that).
 // Footsteps are the hearing game: your own steps are soft ticks, and an enemy
 // bot's steps grow louder the closer it is, so a flank is heard before it is seen.
+// Steps on the steel gantry deck ring brighter than steps on concrete.
 export function createAudio() {
   let ctx = null;
   let master = null;
@@ -113,10 +114,16 @@ export function createAudio() {
     noise(0.1, 'lowpass', 500, 0.25);
   }
 
-  // A footstep: a short filtered tick. `loud` scales with proximity.
-  function step(loud = 1) {
+  // A footstep: a short filtered tick. `loud` scales with proximity; `metal`
+  // rings brighter for the gantry deck.
+  function step(loud = 1, metal = false) {
     if (!ensure()) return;
-    noise(0.05, 'lowpass', 420, 0.07 * loud);
+    if (metal) {
+      noise(0.06, 'bandpass', 1400, 0.09 * loud);
+      tone('square', 900, 700, 0.03, 0.05 * loud);
+    } else {
+      noise(0.05, 'lowpass', 420, 0.07 * loud);
+    }
   }
 
   function click() {
@@ -147,6 +154,20 @@ export function createAudio() {
     noise(0.5, 'highpass', 2500, 0.3);
   }
 
+  // A smoke canister pops and hisses as the cloud blooms.
+  function smoke() {
+    if (!ensure()) return;
+    tone('square', 500, 200, 0.08, 0.2);
+    noise(1.2, 'highpass', 1800, 0.22, 0.05);
+  }
+
+  // The round horn: two low notes as the buy phase ends and the round goes live.
+  function horn() {
+    if (!ensure()) return;
+    tone('sawtooth', 196, 196, 0.35, 0.16);
+    tone('sawtooth', 262, 262, 0.4, 0.16, 0.3);
+  }
+
   function roundWin() {
     if (!ensure()) return;
     const notes = [523, 659, 784, 1046];
@@ -159,5 +180,5 @@ export function createAudio() {
     notes.forEach((n, i) => tone('triangle', n, n, 0.18, 0.2, i * 0.12));
   }
 
-  return { ensure, shot, reload, dryFire, hit, kill, hurt, step, click, buy, plantBeep, defuseTick, explosion, roundWin, roundLose };
+  return { ensure, shot, reload, dryFire, hit, kill, hurt, step, click, buy, plantBeep, defuseTick, explosion, smoke, horn, roundWin, roundLose };
 }

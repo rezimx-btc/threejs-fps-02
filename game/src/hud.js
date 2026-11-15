@@ -1,10 +1,12 @@
 // HUD: every DOM readout the player sees — health and armour, ammo, money,
-// timer, score, kill feed, radio callouts, crosshair spread, hitmarker, damage
-// flash and the direction the damage came from, plant/defuse progress, a
-// compass strip, the minimap, and the menu / buy / pause / round / match
-// overlays plus the Tab scoreboard. The game logic never touches the DOM; it
-// calls these setters.
-import { WEAPONS, GRENADE, ARMOR, HELMET } from './weapons.js';
+// timer, score, the round-by-round history strip, the economy toast after each
+// round, kill feed, radio callouts, crosshair spread, hitmarker, damage flash
+// and the direction the damage came from, plant/defuse progress, a compass
+// strip, the minimap, and the menu / buy / pause / round / match overlays plus
+// the Tab scoreboard. The game logic never touches the DOM; it calls these
+// setters. The smoke stock and the defuse kit show beside the grenades, so the
+// player always knows what utility is left.
+import { WEAPONS, GRENADE, SMOKE, DEFUSE_KIT, ARMOR, HELMET } from './weapons.js';
 import { CSS } from './palette.js';
 
 export function createHud(mapData) {
@@ -18,11 +20,15 @@ export function createHud(mapData) {
     ammoReserve: $('ammo-reserve'),
     weaponName: $('weapon-name'),
     grenadeCount: $('grenade-count'),
+    smokeCount: $('smoke-count'),
+    kitBadge: $('kit-badge'),
     money: $('money'),
     timer: $('timer'),
     roundLabel: $('round-label'),
     scoreA: $('score-a'),
     scoreB: $('score-b'),
+    history: $('round-history'),
+    ecoToast: $('eco-toast'),
     killfeed: $('killfeed'),
     callouts: $('callouts'),
     crosshair: $('crosshair'),
@@ -60,9 +66,9 @@ export function createHud(mapData) {
   };
 
   const mapCtx = el.minimap.getContext('2d');
-  const MAP_W = 52;
+  const MAP_W = 56;
   const MAP_H = 40;
-  const SCALE = 3.1;
+  const SCALE = 2.9;
   const OX = 6;
   const OY = 6;
 
@@ -72,8 +78,10 @@ export function createHud(mapData) {
 
   let lastFeedLength = 0;
   let lastCallout = '';
+  let lastHistory = '';
   let hitTimer = null;
   let dirTimer = null;
+  let ecoTimer = null;
 
   function setHealth(hp, armor) {
     el.healthNum.textContent = String(Math.max(0, Math.ceil(hp)));
@@ -90,9 +98,11 @@ export function createHud(mapData) {
     el.ammoMag.parentElement.classList.toggle('empty', mag === 0);
   }
 
-  function setWeapon(name, grenades) {
+  function setWeapon(name, grenades, smokes, hasKit) {
     el.weaponName.textContent = name;
     el.grenadeCount.textContent = grenades > 0 ? `◉ ${grenades}` : '';
+    el.smokeCount.textContent = smokes > 0 ? `☁ ${smokes}` : '';
+    el.kitBadge.textContent = hasKit ? 'KIT' : '';
   }
 
   function setMoney(amount) {
@@ -112,6 +122,23 @@ export function createHud(mapData) {
     el.scoreA.textContent = String(winsA);
     el.scoreB.textContent = String(winsB);
     el.roundLabel.textContent = `ROUND ${round} / 9 — FIRST TO 5`;
+  }
+
+  // The round history strip: one W/L chip per finished round, so the match
+  // story is visible without opening the scoreboard.
+  function setHistory(history) {
+    const key = history.join('');
+    if (key === lastHistory) return;
+    lastHistory = key;
+    el.history.innerHTML = history.map((r) => `<span class="${r === 'W' ? 'w' : 'l'}">${r}</span>`).join('');
+  }
+
+  // The economy toast: what the last round paid, shown for a few seconds.
+  function showEco(text) {
+    el.ecoToast.textContent = text;
+    el.ecoToast.classList.add('on');
+    if (ecoTimer) clearTimeout(ecoTimer);
+    ecoTimer = setTimeout(() => el.ecoToast.classList.remove('on'), 4200);
   }
 
   function setObjective(text) {
@@ -185,7 +212,7 @@ export function createHud(mapData) {
   }
 
   // Compass: heading ticks plus the two site bearings, so the player always
-  // knows which way the Depot and the Silos are without opening the map.
+  // knows which way the Crane Yard and the Fuel Dock are without opening the map.
   function setCompass(yaw) {
     // yaw 0 faces north (-z). A bearing of 0 deg is north on the map.
     const heading = ((-yaw * 180) / Math.PI) % 360;
@@ -205,7 +232,8 @@ export function createHud(mapData) {
 
   // Minimap: walls, the two sites, teammates (teal), the player (white arrow),
   // the planted charge (blinking amber), and enemies only while they were seen
-  // in the last 4 seconds (red, fading).
+  // in the last 4 seconds (red, fading). The gantry deck draws as a hatched
+  // strip along the north edge, so the high ground reads on the map.
   function drawMinimap(playerPos, yaw, teammates, seenEnemies, time, plantedPos) {
     const ctx = mapCtx;
     ctx.clearRect(0, 0, el.minimap.width, el.minimap.height);
@@ -216,6 +244,9 @@ export function createHud(mapData) {
       const [x, y] = toMap(wall.x, wall.z);
       ctx.fillRect(x, y, wall.w * SCALE, wall.d * SCALE);
     }
+    const [dx, dy] = toMap(-28, -19.5);
+    ctx.fillStyle = 'rgba(120,140,160,0.35)';
+    ctx.fillRect(dx, dy, 56 * SCALE, 3.7 * SCALE);
     ctx.font = 'bold 11px system-ui, sans-serif';
     ctx.textAlign = 'center';
     for (const key of ['A', 'B']) {
@@ -271,8 +302,8 @@ export function createHud(mapData) {
     el.round.hidden = kind !== 'round';
     el.match.hidden = kind !== 'match';
     if (kind === 'start') {
-      el.overlayTitle.textContent = 'BREAKLINE';
-      el.overlayCopy.textContent = 'Round-based tactical FPS. Plant the charge at the Depot or the Silos — or wipe the Vulture team. First to 5 rounds takes the match.';
+      el.overlayTitle.textContent = 'CROSSCURRENT';
+      el.overlayCopy.textContent = 'Round-based tactical FPS. Plant the charge at the Crane Yard or the Fuel Dock — or wipe the Breakwater team. First to 5 rounds takes the match. Sides swap at half-time.';
       el.playBtn.textContent = 'Click to play';
     } else if (kind === 'end') {
       el.overlayTitle.textContent = 'Round over';
@@ -311,13 +342,15 @@ export function createHud(mapData) {
     }
     for (const def of Object.values(WEAPONS)) addCard(def.id, def, def.price === 0 ? 'FREE' : `$${def.price.toLocaleString('en-US')}`);
     addCard('grenade', GRENADE, `$${GRENADE.price} · max ${GRENADE.maxCarry}`);
+    addCard('smoke', SMOKE, `$${SMOKE.price} · max ${SMOKE.maxCarry}`);
+    addCard('kit', DEFUSE_KIT, `$${DEFUSE_KIT.price} · defuse 2.5 s`);
     addCard('armor', ARMOR, `$${ARMOR.price} · ${ARMOR.points} plates`);
     addCard('helmet', HELMET, `$${HELMET.price} · half headshot dmg`);
     el.buyClose.addEventListener('click', onClose);
     return {
-      refresh(owned, money, armor, hasHelmet, grenades) {
+      refresh(owned, money, armor, hasHelmet, grenades, smokes, hasKit) {
         for (const { id, card } of cards) {
-          const def = WEAPONS[id] || (id === 'grenade' ? GRENADE : id === 'armor' ? ARMOR : HELMET);
+          const def = WEAPONS[id] || (id === 'grenade' ? GRENADE : id === 'smoke' ? SMOKE : id === 'kit' ? DEFUSE_KIT : id === 'armor' ? ARMOR : HELMET);
           let isOwned = false;
           let label = '';
           if (WEAPONS[id]) {
@@ -326,6 +359,12 @@ export function createHud(mapData) {
           } else if (id === 'grenade') {
             isOwned = grenades >= GRENADE.maxCarry;
             label = isOwned ? `MAX (${grenades})` : `$${GRENADE.price} · have ${grenades}`;
+          } else if (id === 'smoke') {
+            isOwned = smokes >= SMOKE.maxCarry;
+            label = isOwned ? `MAX (${smokes})` : `$${SMOKE.price} · have ${smokes}`;
+          } else if (id === 'kit') {
+            isOwned = hasKit;
+            label = isOwned ? 'OWNED' : `$${DEFUSE_KIT.price} · defuse 2.5 s`;
           } else if (id === 'armor') {
             isOwned = armor >= ARMOR.points;
             label = isOwned ? 'EQUIPPED' : `$${ARMOR.price} · ${ARMOR.points} plates`;
@@ -348,6 +387,8 @@ export function createHud(mapData) {
     setMoney,
     setTimer,
     setScore,
+    setHistory,
+    showEco,
     setObjective,
     setPlan,
     setCrosshair,

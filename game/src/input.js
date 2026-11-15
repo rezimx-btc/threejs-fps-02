@@ -1,7 +1,9 @@
 // Input: keyboard state, pointer-lock mouse look, firing, and aim-down-sights.
 // Pointer lock is requested by the HUD's play button; losing it pauses the game
 // (unless a shot capture is running, where input is scripted instead). Right
-// mouse holds ADS; the Tab key opens the scoreboard while held.
+// mouse holds ADS; the Tab key opens the scoreboard while held. `consume(code)`
+// reads and clears a one-shot key (buy menu, grenade, smoke, plant) so a held
+// key never fires twice.
 export function createInput(canvas, onLockChange) {
   const keys = new Set();
   let locked = false;
@@ -67,6 +69,11 @@ export function createInput(canvas, onLockChange) {
       const edge = firingEdge;
       firingEdge = false;
       return edge;
+    },
+    consume(code) {
+      if (!keys.has(code)) return false;
+      keys.delete(code);
+      return true;
     },
     requestLock() {
       try { canvas.requestPointerLock(); } catch { /* pointer lock unavailable */ }

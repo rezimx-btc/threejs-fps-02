@@ -2,7 +2,8 @@
 // attached to the camera. Each weapon family gets its own silhouette and length.
 // Recoil kicks it back, reloading dips it down, ADS slides it to the centre of
 // the screen and narrows the field of view, and a muzzle flash fires on every
-// shot — all driven from main.js, no per-frame allocation.
+// shot. While the player moves, the gun sways gently with the stride; while
+// still, it settles — all driven from main.js, no per-frame allocation.
 import * as THREE from 'three';
 
 export function createViewmodel(camera) {
@@ -32,6 +33,7 @@ export function createViewmodel(camera) {
   let dip = 0;
   let flashLife = 0;
   let adsAmount = 0;
+  let swayPhase = 0;
 
   function setWeapon(kind) {
     const long = kind === 'dmr' || kind === 'shotgun';
@@ -51,7 +53,7 @@ export function createViewmodel(camera) {
     dip = 1;
   }
 
-  function step(dt, aiming) {
+  function step(dt, aiming, moveSpeed = 0) {
     kick = Math.max(0, kick - dt * 9);
     dip = Math.max(0, dip - dt * 1.6);
     flashLife = Math.max(0, flashLife - dt);
@@ -59,10 +61,15 @@ export function createViewmodel(camera) {
     flash.rotation.z = Math.random() * Math.PI;
     // ADS eases the gun to the centre of the screen over ~0.12 s.
     adsAmount += ((aiming ? 1 : 0) - adsAmount) * Math.min(1, dt * 14);
+    // Sway: the gun bobs with the stride while moving, settles while still.
+    swayPhase += dt * moveSpeed * 1.6;
+    const swayAmp = Math.min(0.02, moveSpeed * 0.0035) * (1 - adsAmount * 0.8);
+    const swayX = Math.sin(swayPhase) * swayAmp;
+    const swayY = Math.abs(Math.cos(swayPhase)) * swayAmp * 0.6;
     const baseX = 0.28;
     const baseY = -0.26;
-    group.position.x = baseX * (1 - adsAmount);
-    group.position.y = baseY * (1 - adsAmount) - 0.055 * adsAmount;
+    group.position.x = baseX * (1 - adsAmount) + swayX;
+    group.position.y = baseY * (1 - adsAmount) - 0.055 * adsAmount - swayY;
     group.position.z = -0.55 + kick * 0.09;
     group.rotation.x = kick * 0.06 + dip * 0.5;
   }

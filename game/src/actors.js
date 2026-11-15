@@ -3,7 +3,8 @@
 // a team-coloured visor, legs and a gun. The torso and head meshes are the
 // raycast hit targets; their userData names the actor and the body part, so
 // headshots pay more. Armour is worn on the body: damage splits between plates
-// and health before the actor falls.
+// and health before the actor falls. Legs swing while the actor walks, so a
+// moving bot reads as moving from across the quay.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 import { ARMOR } from './weapons.js';
@@ -11,6 +12,7 @@ import { ARMOR } from './weapons.js';
 const RADIUS = 0.34;
 const HEIGHT = 1.72;
 const EYE = 1.5;
+export const STEP_UP = 0.38; // low ledges and ramp steps a body can climb
 
 export function createActorMesh(scene, team) {
   const group = new THREE.Group();
@@ -44,10 +46,12 @@ export function createActorMesh(scene, team) {
   gun.position.set(0.28, 1.25, 0.3);
   group.add(torso, vest, head, helmet, visor, pack, legL, legR, gun);
   scene.add(group);
-  return { group, torso, head };
+  return { group, torso, head, legL, legR };
 }
 
-// Axis-separated AABB movement shared by every bot. Returns true when blocked.
+// Axis-separated AABB movement shared by every bot, with a step-up: a low ledge
+// (a ramp step, a crate edge) is climbed instead of blocking the body, so bots
+// can take the gantry ramps up to the walkway. Returns true when blocked.
 export function moveBox(position, velocity, dt, colliders, height = HEIGHT) {
   const probe = new THREE.Box3();
   function overlaps(x, y, z, lift) {
@@ -56,12 +60,31 @@ export function moveBox(position, velocity, dt, colliders, height = HEIGHT) {
     for (const collider of colliders) if (probe.intersectsBox(collider)) return true;
     return false;
   }
+  function tryStep(x, y, z) {
+    // Grounded step-up: if the feet are blocked but the space STEP_UP above is
+    // free, lift the body onto the ledge instead of stopping.
+    if (y > 0.05) return false;
+    if (!overlaps(x, STEP_UP, z, 0.04)) return true;
+    return false;
+  }
   const nextX = position.x + velocity.x * dt;
-  if (!overlaps(nextX, position.y, position.z, 0.04)) position.x = nextX;
-  else velocity.x = 0;
+  if (!overlaps(nextX, position.y, position.z, 0.04)) {
+    position.x = nextX;
+  } else if (tryStep(nextX, position.y, position.z)) {
+    position.x = nextX;
+    position.y += STEP_UP;
+  } else {
+    velocity.x = 0;
+  }
   const nextZ = position.z + velocity.z * dt;
-  if (!overlaps(position.x, position.y, nextZ, 0.04)) position.z = nextZ;
-  else velocity.z = 0;
+  if (!overlaps(position.x, position.y, nextZ, 0.04)) {
+    position.z = nextZ;
+  } else if (tryStep(position.x, position.y, nextZ)) {
+    position.z = nextZ;
+    position.y += STEP_UP;
+  } else {
+    velocity.z = 0;
+  }
   if (position.y < 0) position.y = 0;
 }
 
@@ -81,6 +104,7 @@ export function createActor(scene, opts) {
     mesh,
     hitMeshes: [mesh.torso, mesh.head],
     onDeath: null,
+    walkPhase: 0,
   };
   mesh.torso.userData = { actor, part: 'body' };
   mesh.head.userData = { actor, part: 'head' };
@@ -123,13 +147,22 @@ export function createActor(scene, opts) {
     actor.health = 100;
     actor.armor = 0;
     actor.alive = true;
+    actor.walkPhase = 0;
     mesh.group.rotation.set(0, yaw, 0);
     mesh.group.position.copy(actor.position);
+    mesh.legL.rotation.x = 0;
+    mesh.legR.rotation.x = 0;
   };
   actor.syncMesh = function syncMesh() {
     if (!actor.alive) return;
     mesh.group.position.copy(actor.position);
     mesh.group.rotation.y = actor.yaw;
+    // Walk cycle: legs swing with distance covered, nothing allocated.
+    const speed = Math.hypot(actor.velocity.x, actor.velocity.z);
+    actor.walkPhase += speed * 0.09;
+    const swing = speed > 0.5 ? Math.sin(actor.walkPhase) * 0.55 : 0;
+    mesh.legL.rotation.x = swing;
+    mesh.legR.rotation.x = -swing;
   };
   return actor;
 }

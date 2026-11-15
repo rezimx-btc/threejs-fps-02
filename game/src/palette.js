@@ -1,34 +1,37 @@
-// BREAKLINE palette: a night container terminal — deep blue dark, sodium-orange
-// lamps, rust and teal containers, one amber accent for the objective. Every
-// colour in the game and the HUD comes from this table, so the night scene and
-// the interface read as one chosen look.
+// CROSSCURRENT palette: a dawn harbour quay — cold blue dark, low amber sun,
+// rust and sea-green containers, one signal-amber accent for the objective.
+// Every colour in the game and the HUD comes from this table, so the dawn scene
+// and the interface read as one chosen look.
 export const PALETTE = {
-  canvas: 0x0d1218, // night sky / background
-  ground: 0x2b2f36, // wet asphalt yard
-  groundDark: 0x1e2228, // worn patches, oil stains
-  wall: 0x39404a, // gunmetal perimeter
-  wallLight: 0x4b545f,
-  crate: 0x6b4e2e, // timber crates
-  crateDark: 0x4e3822,
-  metal: 0x232a33, // containers, dark steel
-  metalLight: 0x4a5560,
-  rust: 0x8a4a28, // rust-red containers
-  tealBox: 0x2e6b66, // teal containers
-  ochreBox: 0xa8873a, // ochre containers
+  canvas: 0x141c26, // dawn sky / background
+  ground: 0x33383c, // damp concrete quay
+  groundDark: 0x23272b, // worn patches, oil stains
+  wall: 0x3d454e, // gunmetal perimeter
+  wallLight: 0x525d68,
+  crate: 0x7a5a30, // timber crates
+  crateDark: 0x54401f,
+  metal: 0x252c34, // containers, dark steel
+  metalLight: 0x4e5a66,
+  rust: 0x96502a, // rust-red containers
+  tealBox: 0x2f7a6e, // sea-green containers
+  ochreBox: 0xb08a35, // ochre containers
   accent: 0xffb02e, // amber: HUD accent, site beacons
-  lamp: 0xffc46b, // sodium lamp glow
-  teamA: 0x2fd4c0, // Kestrel (player team) teal
-  teamB: 0xff5a3c, // Vulture (opposition) signal orange
+  lamp: 0xffc46b, // dawn lamp glow
+  sun: 0xffd9a0, // low sun
+  water: 0x1d3a4a, // harbour water beyond the north wall
+  teamA: 0x2fd4c0, // Meridian (player team) teal
+  teamB: 0xff5a3c, // Breakwater (opposition) signal orange
   ink: 0xf2ede2,
   muted: 0x9aa4ae,
   danger: 0xff4d5e,
-  grass: 0x2e4028, // scrub at the yard edges
+  smoke: 0xbfc8cc, // drift-smoke grey
+  grass: 0x37452c, // scrub at the yard edges
 };
 
 export const CSS = {
-  canvas: '#0d1218',
-  surface: '#161c24',
-  hairline: '#2a323d',
+  canvas: '#141c26',
+  surface: '#182029',
+  hairline: '#2c3540',
   ink: '#f2ede2',
   muted: '#9aa4ae',
   accent: '#ffb02e',

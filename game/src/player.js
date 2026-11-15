@@ -1,10 +1,13 @@
 // Player movement: acceleration, friction, gravity, crouch and jump, resolved as
 // a box against the map's colliders one axis at a time, so a wall never swallows
 // the player. Aiming down sights slows the player down and steadies the gun;
-// sprinting across the open yard is fast and loud, stopping to aim pays. Armour
-// is tracked here too: the plate vest soaks half of every hit until it breaks.
+// sprinting across the open quay is fast and loud, stopping to aim pays. A low
+// ledge is stepped onto instead of blocking movement, so the player can climb
+// the gantry ramps to the walkway. Armour is tracked here too: the plate vest
+// soaks half of every hit until it breaks.
 import * as THREE from 'three';
 import { ARMOR } from './weapons.js';
+import { STEP_UP } from './actors.js';
 
 const RADIUS = 0.34;
 const STAND_HEIGHT = 1.72;
@@ -128,12 +131,28 @@ export function createPlayer(colliders, spawn) {
     }
     player.velocity.y -= GRAVITY * dt;
 
-    const nextX = player.position.x + player.velocity.x * dt;
-    if (!overlaps(nextX, player.position.y, player.position.z, player.height, 0.04)) player.position.x = nextX;
-    else player.velocity.x = 0;
-    const nextZ = player.position.z + player.velocity.z * dt;
-    if (!overlaps(player.position.x, player.position.y, nextZ, player.height, 0.04)) player.position.z = nextZ;
-    else player.velocity.z = 0;
+    // Horizontal moves, one axis at a time, with a step-up onto low ledges:
+    // if the feet are blocked but the space STEP_UP above is free, climb.
+    function moveAxis(axis, delta) {
+      const nx = player.position.x + (axis === 'x' ? delta : 0);
+      const nz = player.position.z + (axis === 'z' ? delta : 0);
+      if (!overlaps(nx, player.position.y, nz, player.height, 0.04)) {
+        player.position.x = nx;
+        player.position.z = nz;
+        return;
+      }
+      if (player.onGround && !overlaps(nx, player.position.y + STEP_UP, nz, player.height, 0.04)) {
+        player.position.x = nx;
+        player.position.z = nz;
+        player.position.y += STEP_UP;
+        player.onGround = true;
+        return;
+      }
+      if (axis === 'x') player.velocity.x = 0;
+      else player.velocity.z = 0;
+    }
+    moveAxis('x', player.velocity.x * dt);
+    moveAxis('z', player.velocity.z * dt);
 
     player.position.y += player.velocity.y * dt;
     player.onGround = false;
