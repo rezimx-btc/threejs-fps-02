@@ -61,24 +61,24 @@ node serve.ts
 
 ```
 game/
-  index.html          HUD, overlays, import map
+  index.html            HUD, overlays, import map
   src/
-    main.js           boot, fixed-step loop, round flow, player shooting
-    map.js            Foundry Yard geometry, colliders, waypoint graph
-    bots.js           bot AI: routes, holds, engages, defuses
-    actors.js         bot bodies, hitboxes, shared movement
-    combat.js         hitscan, line of sight, grenades, the charge, tracers
-    state.js          match state: phases, rounds, money, loadout
-    hud.js            HUD, minimap, buy menu, overlays
-    player.js         movement: accel, friction, crouch, jump, collision
-    weapons.js        weapon and grenade definitions
-    audio.js          synthesised WebAudio effects
-    viewmodel.js      first-person gun, recoil, muzzle flash
-    input.js          keyboard, pointer lock, firing
-    palette.js        the one chosen palette
-  vendor/three/      three.js 0.187.0, vendored byte for byte
-screenshots/         real renders of the game's own code (headless Chromium)
-main.ts               hands game/ + screenshots/ to /output with a dossier
+    main.js             boot, fixed-step loop, round flow, player shooting
+    map.js              Foundry Yard geometry, colliders, waypoint graph
+    bots.js             bot AI: routes, holds, engages, defuses
+    actors.js           bot bodies, hitboxes, shared movement
+    combat.js           hitscan, line of sight, grenades, the charge, tracers
+    state.js            match state: phases, rounds, money, loadout
+    hud.js              HUD, minimap, buy menu, overlays
+    player.js           movement: accel, friction, crouch, jump, collision
+    weapons.js          weapon and grenade definitions
+    audio.js            synthesised WebAudio effects
+    viewmodel.js        first-person gun, recoil, muzzle flash
+    input.js            keyboard, pointer lock, firing
+    palette.js          the one chosen palette
+  vendor/three/        three.js 0.187.0, vendored byte for byte
+screenshots/           real renders of the game's own code (headless Chromium)
+main.ts                 hands game/ + screenshots/ to /output with a dossier
 ```
 
 ## Handing in
