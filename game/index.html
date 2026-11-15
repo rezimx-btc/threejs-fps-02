@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>BREAKLINE — a three.js tactical FPS</title>
+<title>CROSSCURRENT — a three.js tactical FPS</title>
 <style>
-  /* Look plan: night terminal, wet asphalt, sodium lamps, teal Kestrel against
-     signal-orange Vulture, one amber accent. */
+  /* Look plan: dawn harbour quay, damp concrete, low amber sun, teal Meridian
+     against signal-orange Breakwater, one amber accent. */
   :root {
-    --canvas: #0d1218;
-    --surface: #161c24;
-    --hairline: #2a323d;
+    --canvas: #141c26;
+    --surface: #182029;
+    --hairline: #2c3540;
     --ink: #f2ede2;
     --muted: #9aa4ae;
     --accent: #ffb02e;
@@ -65,13 +65,20 @@
   #score-a { background: var(--team-a); color: var(--canvas); }
   #score-b { background: var(--team-b); color: var(--canvas); }
   #round-label { position: fixed; top: 62px; left: 50%; transform: translateX(-50%); font-family: var(--font-readout); font-size: 11px; letter-spacing: .12em; color: var(--muted); }
-  #objective { position: fixed; top: 84px; left: 50%; transform: translateX(-50%); font-size: 13px; color: var(--accent); letter-spacing: .04em; white-space: nowrap; }
+  #round-history { position: fixed; top: 80px; left: 50%; transform: translateX(-50%); display: flex; gap: 4px; }
+  #round-history span { width: 16px; height: 16px; display: grid; place-items: center; font-family: var(--font-readout); font-size: 10px; font-weight: 700; border-radius: 3px; }
+  #round-history .w { background: var(--team-a); color: var(--canvas); }
+  #round-history .l { background: var(--danger); color: var(--canvas); }
+  #objective { position: fixed; top: 104px; left: 50%; transform: translateX(-50%); font-size: 13px; color: var(--accent); letter-spacing: .04em; white-space: nowrap; }
 
-  #compass { position: fixed; top: 108px; left: 50%; transform: translateX(-50%); width: 280px; height: 18px; overflow: hidden; font-family: var(--font-readout); font-size: 11px; color: var(--muted); text-align: center; }
+  #eco-toast { position: fixed; top: 128px; left: 50%; transform: translateX(-50%); font-family: var(--font-readout); font-size: 13px; color: var(--accent); background: rgba(24, 32, 41, .9); border: 1px solid var(--hairline); border-radius: var(--radius-panel); padding: 4px 10px; opacity: 0; transition: opacity .3s; }
+  #eco-toast.on { opacity: 1; }
+
+  #compass { position: fixed; top: 156px; left: 50%; transform: translateX(-50%); width: 280px; height: 18px; overflow: hidden; font-family: var(--font-readout); font-size: 11px; color: var(--muted); text-align: center; }
   #compass span, #compass b { position: absolute; transform: translateX(-50%); }
   #compass b { color: var(--accent); font-size: 13px; }
 
-  #plant-wrap { position: fixed; top: 132px; left: 50%; transform: translateX(-50%); width: 260px; text-align: center; }
+  #plant-wrap { position: fixed; top: 180px; left: 50%; transform: translateX(-50%); width: 260px; text-align: center; }
   #plant-wrap[hidden] { display: none; }
   #plant-label { font-family: var(--font-readout); font-size: 11px; letter-spacing: .1em; color: var(--accent); margin-bottom: 5px; }
   #plant-bar { height: 6px; background: var(--hairline); border-radius: 3px; overflow: hidden; }
@@ -99,6 +106,8 @@
   #ammo-reserve { font-size: 16px; color: var(--muted); }
   #weapon-name { font-size: 13px; color: var(--muted); margin-top: 4px; }
   #grenade-count { font-size: 13px; color: var(--accent); }
+  #smoke-count { font-size: 13px; color: #bfc8cc; }
+  #kit-badge { font-size: 13px; color: var(--team-a); font-family: var(--font-readout); }
 
   #money { position: fixed; right: 32px; bottom: 128px; font-family: var(--font-readout); font-size: 20px; color: var(--accent); }
 
@@ -153,7 +162,9 @@
     <span class="team-score" id="score-b">0</span>
   </div>
   <div id="round-label">ROUND 1 / 9 — FIRST TO 5</div>
-  <div id="objective">Plant the charge at A (Depot) or B (Silos).</div>
+  <div id="round-history"></div>
+  <div id="objective">Plant the charge at A (Crane Yard) or B (Fuel Dock).</div>
+  <div id="eco-toast"></div>
   <div id="compass"></div>
   <div id="plant-wrap" hidden>
     <div id="plant-label">PLANTING… hold E</div>
@@ -174,8 +185,10 @@
   <div id="money">$800</div>
   <div id="ammo">
     <div id="ammo-line"><span id="ammo-mag">30</span><span id="ammo-reserve">/ 90</span></div>
-    <div id="weapon-name">VK-9 Carbine</div>
+    <div id="weapon-name">Current Carbine</div>
     <div id="grenade-count"></div>
+    <div id="smoke-count"></div>
+    <div id="kit-badge"></div>
   </div>
   <div id="scoreboard" hidden>
     <div id="score-rows"><h2>SCOREBOARD — HOLD TAB</h2></div>
@@ -184,15 +197,15 @@
 
 <div id="overlay" class="overlay">
   <section class="panel" role="dialog" aria-modal="true" aria-labelledby="overlay-title">
-    <h1 id="overlay-title">BREAKLINE</h1>
-    <div class="teams-note"><span class="a">KESTREL — you</span><span class="b">VULTURE — defence</span></div>
-    <p id="overlay-copy">Round-based tactical FPS. Plant the charge at the Depot or the Silos — or wipe the Vulture team. First to 5 rounds takes the match.</p>
+    <h1 id="overlay-title">CROSSCURRENT</h1>
+    <div class="teams-note"><span class="a">MERIDIAN — you</span><span class="b">BREAKWATER — defence</span></div>
+    <p id="overlay-copy">Round-based tactical FPS. Plant the charge at the Crane Yard or the Fuel Dock — or wipe the Breakwater team. First to 5 rounds takes the match. Sides swap at half-time.</p>
     <button id="play-btn" type="button">Click to play</button>
     <ul class="keys">
       <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move &nbsp;·&nbsp; <kbd>Mouse</kbd> Look &nbsp;·&nbsp; <kbd>RMB</kbd> Aim down sights</li>
       <li><kbd>Click</kbd> Fire &nbsp;·&nbsp; <kbd>R</kbd> Reload &nbsp;·&nbsp; <kbd>1</kbd>–<kbd>5</kbd> Weapons &nbsp;·&nbsp; <kbd>Tab</kbd> Scoreboard</li>
-      <li><kbd>B</kbd> Buy menu &nbsp;·&nbsp; <kbd>G</kbd> Throw grenade &nbsp;·&nbsp; <kbd>E</kbd> Plant charge</li>
-      <li><kbd>Ctrl</kbd> Crouch &nbsp;·&nbsp; <kbd>Space</kbd> Jump</li>
+      <li><kbd>B</kbd> Buy menu &nbsp;·&nbsp; <kbd>G</kbd> Frag grenade &nbsp;·&nbsp; <kbd>F</kbd> Smoke &nbsp;·&nbsp; <kbd>E</kbd> Plant / defuse</li>
+      <li><kbd>Ctrl</kbd> Crouch &nbsp;·&nbsp; <kbd>Space</kbd> Jump &nbsp;·&nbsp; climb the gantry stairs to the walkway</li>
     </ul>
   </section>
 </div>
@@ -200,7 +213,7 @@
 <div id="pause-overlay" class="overlay" hidden>
   <section class="panel" role="dialog" aria-modal="true">
     <h1>Paused</h1>
-    <p>The round waits for you. Your squad holds the terminal.</p>
+    <p>The round waits for you. Your squad holds the quay.</p>
     <button id="resume-btn" type="button">Resume</button>
   </section>
 </div>
@@ -220,7 +233,7 @@
 
 <div id="round-overlay" class="overlay" hidden>
   <section class="panel" role="dialog" aria-modal="true">
-    <h1 id="round-title">KESTREL TAKES THE ROUND</h1>
+    <h1 id="round-title">MERIDIAN TAKES THE ROUND</h1>
     <p id="round-sub"></p>
     <div id="round-board"></div>
   </section>
@@ -228,7 +241,7 @@
 
 <div id="match-overlay" class="overlay" hidden>
   <section class="panel" role="dialog" aria-modal="true">
-    <h1 id="match-title">KESTREL WINS THE MATCH</h1>
+    <h1 id="match-title">MERIDIAN WINS THE MATCH</h1>
     <p id="match-sub"></p>
     <p id="match-stats"></p>
     <button id="again-btn" type="button">Play again</button>
