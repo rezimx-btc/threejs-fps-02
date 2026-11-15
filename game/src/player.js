@@ -1,7 +1,10 @@
 // Player movement: acceleration, friction, gravity, crouch and jump, resolved as
 // a box against the map's colliders one axis at a time, so a wall never swallows
-// the player. Stopping to aim pays: spread grows with ground speed (see combat.js).
+// the player. Aiming down sights slows the player down and steadies the gun;
+// sprinting across the open yard is fast and loud, stopping to aim pays. Armour
+// is tracked here too: the plate vest soaks half of every hit until it breaks.
 import * as THREE from 'three';
+import { ARMOR } from './weapons.js';
 
 const RADIUS = 0.34;
 const STAND_HEIGHT = 1.72;
@@ -9,6 +12,7 @@ const CROUCH_HEIGHT = 1.12;
 const STAND_EYE = 1.6;
 const CROUCH_EYE = 1.02;
 const WALK_SPEED = 5.4;
+const ADS_SPEED = 3.1;
 const CROUCH_SPEED = 2.5;
 const GROUND_ACCEL = 42;
 const AIR_ACCEL = 9;
@@ -25,8 +29,10 @@ export function createPlayer(colliders, spawn) {
     eye: STAND_EYE,
     onGround: true,
     crouching: false,
+    aiming: false,
     height: STAND_HEIGHT,
     health: 100,
+    armor: 0,
     alive: true,
   };
   const probe = new THREE.Box3();
@@ -42,13 +48,32 @@ export function createPlayer(colliders, spawn) {
   }
 
   function look(dx, dy, sensitivity = 0.0022) {
-    player.yaw -= dx * sensitivity;
-    player.pitch = Math.max(-1.45, Math.min(1.45, player.pitch - dy * sensitivity));
+    const scale = player.aiming ? 0.55 : 1; // ADS steadies the aim
+    player.yaw -= dx * sensitivity * scale;
+    player.pitch = Math.max(-1.45, Math.min(1.45, player.pitch - dy * sensitivity * scale));
   }
 
   function recoil(pitchKick, yawKick) {
     player.pitch = Math.min(1.45, player.pitch + pitchKick);
     player.yaw += yawKick;
+  }
+
+  // Damage goes to the plate vest first, then to health. Returns true on death.
+  function damage(amount) {
+    if (!player.alive) return false;
+    let remaining = amount;
+    if (player.armor > 0) {
+      const absorbed = Math.min(player.armor, amount * ARMOR.absorb);
+      player.armor -= absorbed;
+      remaining = amount - absorbed;
+    }
+    player.health -= remaining;
+    if (player.health <= 0) {
+      player.health = 0;
+      player.alive = false;
+      return true;
+    }
+    return false;
   }
 
   function reset(x, z, yaw) {
@@ -57,8 +82,10 @@ export function createPlayer(colliders, spawn) {
     player.yaw = yaw;
     player.pitch = 0;
     player.health = 100;
+    player.armor = 0;
     player.alive = true;
     player.crouching = false;
+    player.aiming = false;
     player.height = STAND_HEIGHT;
     player.eye = STAND_EYE;
   }
@@ -85,7 +112,7 @@ export function createPlayer(colliders, spawn) {
       wish.set(-sin * forward + cos * strafe, 0, -cos * forward - sin * strafe).normalize();
     }
 
-    const speed = player.crouching ? CROUCH_SPEED : WALK_SPEED;
+    const speed = player.crouching ? CROUCH_SPEED : player.aiming ? ADS_SPEED : WALK_SPEED;
     const blend = Math.min(1, (player.onGround ? GROUND_ACCEL : AIR_ACCEL) * dt / speed);
     player.velocity.x += (wish.x * speed - player.velocity.x) * blend;
     player.velocity.z += (wish.z * speed - player.velocity.z) * blend;
@@ -132,6 +159,7 @@ export function createPlayer(colliders, spawn) {
     step,
     look,
     recoil,
+    damage,
     reset,
     groundSpeed() {
       return Math.hypot(player.velocity.x, player.velocity.z);
