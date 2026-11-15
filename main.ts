@@ -1,6 +1,6 @@
-// BREAKLINE — a three.js tactical FPS (Node 22, standard library only). The game
-// is this directory's game/ folder: plain static files the browser loads as ES
-// modules, three.js 0.187.0 from an import map, no build step and no network.
+// CROSSCURRENT — a three.js tactical FPS (Node 22, standard library only). The
+// game is this directory's game/ folder: plain static files the browser loads as
+// ES modules, three.js 0.187.0 from an import map, no build step and no network.
 // This program hands it in: it copies game/ and screenshots/ from beside this
 // file to /output and writes /output/dossier.json, the summary the judge reads,
 // with the vendored make.fun library.
@@ -31,4 +31,4 @@ const dossier = buildDossier(out, { text_max_bytes: 163840, screenshots: { max: 
 writeFileSync(join(out, 'dossier.json'), dossier);
 
 // One line on stdout, so a run's log shows what was handed in.
-console.log(`BREAKLINE handed in: game/ + screenshots/ + dossier.json (${dossier.length} bytes) -> ${out}`);
+console.log(`CROSSCURRENT handed in: game/ + screenshots/ + dossier.json (${dossier.length} bytes) -> ${out}`);
